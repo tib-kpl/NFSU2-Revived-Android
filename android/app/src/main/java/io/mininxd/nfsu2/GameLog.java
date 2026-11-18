@@ -141,41 +141,49 @@ public final class GameLog {
 
     private static void writeToFile(Context ctx, String entry) {
         try {
+            java.util.LinkedHashSet<String> written = new java.util.LinkedHashSet<>();
             File logFile = getPrimaryLogFile(ctx);
-            if (logFile == null) return;
+            writeSingle(logFile, entry, written);
 
-            File parent = logFile.getParentFile();
-            if (parent != null && !parent.exists()) parent.mkdirs();
-
-            if (logFile.exists() && logFile.length() > MAX_FILE_SIZE) {
-                File oldFile = new File(logFile.getAbsolutePath() + ".old");
-                if (oldFile.exists()) oldFile.delete();
-                logFile.renameTo(oldFile);
-            }
-
-            try (FileWriter writer = new FileWriter(logFile, true)) {
-                writer.write(entry);
-                writer.write("\n");
-                writer.flush();
-            }
-
-            // Sync copy to /sdcard/NFSU2/game_log.txt and /sdcard/nfsu2/game_log.txt
             for (String folder : new String[]{"NFSU2", "nfsu2"}) {
                 try {
                     File sdcardDir = new File(Environment.getExternalStorageDirectory(), folder);
                     if (sdcardDir.isDirectory() || sdcardDir.mkdirs()) {
-                        File sdcardFile = new File(sdcardDir, "game_log.txt");
-                        try (FileWriter writer = new FileWriter(sdcardFile, true)) {
-                            writer.write(entry);
-                            writer.write("\n");
-                            writer.flush();
-                        }
+                        writeSingle(new File(sdcardDir, "game_log.txt"), entry, written);
                     }
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
             Log.d(TAG, "writeToFile failed: " + t.getMessage());
         }
+    }
+
+    private static void writeSingle(File file, String entry, java.util.Set<String> written) {
+        if (file == null) return;
+        try {
+            File parent = file.getParentFile();
+            if (parent != null && !parent.exists()) parent.mkdirs();
+
+            String canon;
+            try {
+                canon = file.getCanonicalPath();
+            } catch (Throwable t) {
+                canon = file.getAbsolutePath().toLowerCase(Locale.US);
+            }
+            if (!written.add(canon)) return;
+
+            if (file.exists() && file.length() > MAX_FILE_SIZE) {
+                File oldFile = new File(file.getAbsolutePath() + ".old");
+                if (oldFile.exists()) oldFile.delete();
+                file.renameTo(oldFile);
+            }
+
+            try (FileWriter writer = new FileWriter(file, true)) {
+                writer.write(entry);
+                writer.write("\n");
+                writer.flush();
+            }
+        } catch (Throwable ignored) {}
     }
 
     private static void writeHaltFile(Context ctx, String report) {

@@ -339,54 +339,63 @@ public final class InputLog {
 
     private static void writeToFile(Context ctx, String entry) {
         try {
+            java.util.LinkedHashSet<String> writtenCanonicalPaths = new java.util.LinkedHashSet<>();
+
+            // 1. Primary app file
             File logFile = getPrimaryLogFile(ctx);
-            if (logFile != null) {
-                File parent = logFile.getParentFile();
-                if (parent != null && !parent.exists()) parent.mkdirs();
+            writeToSingleFile(logFile, entry, writtenCanonicalPaths);
 
-                if (logFile.exists() && logFile.length() > MAX_FILE_SIZE) {
-                    File oldFile = new File(logFile.getAbsolutePath() + ".old");
-                    if (oldFile.exists()) oldFile.delete();
-                    logFile.renameTo(oldFile);
-                }
-
-                try (FileWriter writer = new FileWriter(logFile, true)) {
-                    writer.write(entry);
-                    writer.write("\n");
-                    writer.flush();
-                }
-            }
-
-            // 1. Sync copy to active game root directory (e.g. /sdcard/nfsu2 or /sdcard/NFSU2)
+            // 2. Active game root directory (e.g. /sdcard/nfsu2)
             try {
                 File gameDir = LauncherActivity.gameRoot();
                 if (gameDir != null && (gameDir.isDirectory() || gameDir.mkdirs())) {
-                    File gameFile = new File(gameDir, "input_log.txt");
-                    try (FileWriter writer = new FileWriter(gameFile, true)) {
-                        writer.write(entry);
-                        writer.write("\n");
-                        writer.flush();
-                    }
+                    writeToSingleFile(new File(gameDir, "input_log.txt"), entry, writtenCanonicalPaths);
                 }
             } catch (Throwable ignored) {}
 
-            // 2. Sync copy to both /sdcard/NFSU2/input_log.txt and /sdcard/nfsu2/input_log.txt
+            // 3. Fallback sdcard folders
             for (String folder : new String[]{"NFSU2", "nfsu2"}) {
                 try {
                     File sdcardDir = new File(Environment.getExternalStorageDirectory(), folder);
                     if (sdcardDir.isDirectory() || sdcardDir.mkdirs()) {
-                        File sdcardFile = new File(sdcardDir, "input_log.txt");
-                        try (FileWriter writer = new FileWriter(sdcardFile, true)) {
-                            writer.write(entry);
-                            writer.write("\n");
-                            writer.flush();
-                        }
+                        writeToSingleFile(new File(sdcardDir, "input_log.txt"), entry, writtenCanonicalPaths);
                     }
                 } catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
             Log.d(TAG, "writeToFile failed: " + t.getMessage());
         }
+    }
+
+    private static void writeToSingleFile(File targetFile, String entry, java.util.Set<String> writtenPaths) {
+        if (targetFile == null) return;
+        try {
+            File parent = targetFile.getParentFile();
+            if (parent != null && !parent.exists()) parent.mkdirs();
+
+            String canonPath;
+            try {
+                canonPath = targetFile.getCanonicalPath();
+            } catch (Throwable t) {
+                canonPath = targetFile.getAbsolutePath().toLowerCase(Locale.US);
+            }
+
+            if (!writtenPaths.add(canonPath)) {
+                return; // already written to this physical file
+            }
+
+            if (targetFile.exists() && targetFile.length() > MAX_FILE_SIZE) {
+                File oldFile = new File(targetFile.getAbsolutePath() + ".old");
+                if (oldFile.exists()) oldFile.delete();
+                targetFile.renameTo(oldFile);
+            }
+
+            try (FileWriter writer = new FileWriter(targetFile, true)) {
+                writer.write(entry);
+                writer.write("\n");
+                writer.flush();
+            }
+        } catch (Throwable ignored) {}
     }
 
     public static File getPrimaryLogFile(Context ctx) {
