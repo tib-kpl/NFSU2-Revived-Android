@@ -1,12 +1,14 @@
 //! Modular Game Core: Analog controls, right-stick camera orbit, and garage viewer rotation engine for NFSU2 Android.
 
 pub mod camera_stick;
+pub mod controller_camera;
 pub mod contrast_regulator;
 pub mod garage_viewer;
 pub mod lightroom_contrast;
 pub mod nitro_manager;
 
 pub use camera_stick::*;
+pub use controller_camera::*;
 pub use contrast_regulator::*;
 pub use garage_viewer::*;
 pub use lightroom_contrast::*;
@@ -28,6 +30,17 @@ pub extern "system" fn Java_io_mininxd_nfsu2_GameActivity_nativeCameraStickInput
     y: jfloat,
 ) {
     GLOBAL_CAMERA_STICK.set_stick_input(x, y);
+    GLOBAL_CONTROLLER_CAMERA.dispatch(x, y);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_mininxd_nfsu2_GameActivity_nativeControllerCameraFeed(
+    _env: JNIEnv,
+    _class: JClass,
+    x: jfloat,
+    y: jfloat,
+) {
+    GLOBAL_CONTROLLER_CAMERA.dispatch(x, y);
 }
 
 #[no_mangle]

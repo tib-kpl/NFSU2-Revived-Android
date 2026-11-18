@@ -47,11 +47,19 @@ static void resolve_camera_symbols() {
     if (h_roam) {
         if (!s_roam_stick_fn)
             s_roam_stick_fn = reinterpret_cast<void(*)(float, float)>(dlsym(h_roam, "roam_stick_input"));
+        if (!s_roam_stick_fn)
+            s_roam_stick_fn = reinterpret_cast<void(*)(float, float)>(dlsym(h_roam, "nfs_roam_stick_input"));
+        if (!s_roam_stick_fn)
+            s_roam_stick_fn = reinterpret_cast<void(*)(float, float)>(dlsym(h_roam, "Java_io_mininxd_nfsu2_AdhocRoamClient_nativeRoamStick"));
     }
     if (!s_roam_stick_fn)
         s_roam_stick_fn = reinterpret_cast<void(*)(float, float)>(dlsym(RTLD_DEFAULT, "roam_stick_input"));
+    if (!s_roam_stick_fn)
+        s_roam_stick_fn = reinterpret_cast<void(*)(float, float)>(dlsym(RTLD_DEFAULT, "nfs_roam_stick_input"));
+    if (!s_roam_stick_fn)
+        s_roam_stick_fn = reinterpret_cast<void(*)(float, float)>(dlsym(RTLD_DEFAULT, "Java_io_mininxd_nfsu2_AdhocRoamClient_nativeRoamStick"));
 
-    if (s_cam_stick_fn || s_roam_stick_fn) {
+    if (s_cam_stick_fn && s_roam_stick_fn) {
         s_symbols_resolved.store(true, std::memory_order_release);
         __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
             "Resolved camera stick handlers: cam=%p, garage=%p, roam=%p",
@@ -99,10 +107,12 @@ void nfs_gamepad_camera_on_motion(const AInputEvent* event) {
     if (std::fabs(rx_rot) > 0.05f || std::fabs(ry_rot) > 0.05f) {
         chosen_x = rx_rot;
         chosen_y = ry_rot;
-    } else {
-        // Evaluate Z / RZ axes. Do not clamp negative values (-1.0f) as triggers.
+    } else if (rx_z > -0.85f && ry_rz > -0.85f) {
         chosen_x = rx_z;
         chosen_y = ry_rz;
+    } else {
+        chosen_x = 0.0f;
+        chosen_y = 0.0f;
     }
 
     // Apply radial deadzone

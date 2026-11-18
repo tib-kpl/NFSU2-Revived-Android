@@ -294,6 +294,70 @@ public final class InputLog {
         log("Gamepad", msg);
     }
 
+    /**
+     * Native input hook called from C++/NDK onInput when gamepad axes change.
+     */
+    public static void logNativeGamepadAxis(int devId, float lx, float ly, float rx, float ry, float hatX, float hatY, float lt, float rt) {
+        boolean isActive = Math.abs(lx) > 0.10f || Math.abs(ly) > 0.10f ||
+                           Math.abs(rx) > 0.10f || Math.abs(ry) > 0.10f ||
+                           Math.abs(hatX) > 0.10f || Math.abs(hatY) > 0.10f ||
+                           lt > 0.10f || rt > 0.10f;
+
+        Boolean wasActive = lastAxisWasActive.get(devId);
+        if (wasActive == null) wasActive = Boolean.FALSE;
+
+        long now = System.currentTimeMillis();
+        Long lastTime = lastAxisLogTimes.get(devId);
+
+        if (!isActive) {
+            if (wasActive) {
+                lastAxisWasActive.put(devId, Boolean.FALSE);
+                String devName = getDeviceName(devId);
+                log("Gamepad", String.format(Locale.US,
+                        "[GAMEPAD_AXIS] dev=%d [%s] CENTER/RELEASED L=(0.00, 0.00) R=(0.00, 0.00)",
+                        devId, devName));
+            }
+            return;
+        }
+
+        if (lastTime != null && (now - lastTime) < 60) {
+            return;
+        }
+
+        lastAxisLogTimes.put(devId, now);
+        lastAxisWasActive.put(devId, Boolean.TRUE);
+
+        String devName = getDeviceName(devId);
+        String msg = String.format(Locale.US,
+                "[GAMEPAD_AXIS] dev=%d [%s] L=(%.2f, %.2f) R=(%.2f, %.2f) Hat=(%.0f, %.0f) Triggers=(L:%.2f, R:%.2f)",
+                devId, devName, lx, ly, rx, ry, hatX, hatY, lt, rt);
+        log("Gamepad", msg);
+    }
+
+    /**
+     * Native input hook called from C++/NDK onInput when gamepad buttons or keys change.
+     */
+    public static void logNativeGamepadKey(int devId, int action, int keyCode, int scanCode, int repeat) {
+        if (action == 0 && repeat > 0) return; // ignore repeated down
+
+        String devName = getDeviceName(devId);
+        String keyName = KeyEvent.keyCodeToString(keyCode);
+        String actionStr = (action == 0) ? "DOWN" : "UP";
+
+        String msg = String.format(Locale.US,
+                "[GAMEPAD_BTN] dev=%d [%s] action=%-4s key=%s (%d) scan=%d repeat=%d",
+                devId, devName, actionStr, keyName, keyCode, scanCode, repeat);
+        log("Gamepad", msg);
+    }
+
+    private static String getDeviceName(int devId) {
+        try {
+            InputDevice dev = InputDevice.getDevice(devId);
+            if (dev != null) return dev.getName();
+        } catch (Throwable ignored) {}
+        return "Gamepad";
+    }
+
     // -------------------------------------------------------------------------
     // Gamepad & Key Button Logging
     // -------------------------------------------------------------------------

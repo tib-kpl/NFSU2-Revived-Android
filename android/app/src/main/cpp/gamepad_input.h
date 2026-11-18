@@ -52,23 +52,37 @@ public:
         if(std::fabs(rx_cand) > 0.05f || std::fabs(ry_cand) > 0.05f){
             rightX_ = rx_cand;
             rightY_ = ry_cand;
-        }else{
+        }else if(z_cand > -0.85f && rz_cand > -0.85f){
             rightX_ = z_cand;
             rightY_ = rz_cand;
+        }else{
+            rightX_ = 0.0f;
+            rightY_ = 0.0f;
+        }
+
+        if(std::hypot(rightX_, rightY_) < 0.15f){
+            rightX_ = 0.0f;
+            rightY_ = 0.0f;
         }
 
         // Pads report triggers as LTRIGGER/RTRIGGER, BRAKE/GAS or fallback to Z/RZ
         float lt = std::fmax(axis(AMOTION_EVENT_AXIS_LTRIGGER), axis(AMOTION_EVENT_AXIS_BRAKE));
         float rt = std::fmax(axis(AMOTION_EVENT_AXIS_RTRIGGER), axis(AMOTION_EVENT_AXIS_GAS));
-        if (lt <= 0.01f && (std::fabs(rx_cand) > 0.02f || std::fabs(ry_cand) > 0.02f)) {
+        if (lt <= 0.01f) {
             float z_val = axis(AMOTION_EVENT_AXIS_Z);
-            if (z_val > 0.01f) lt = z_val;
-            else if (z_val > -0.9f && z_val < 0.0f) lt = (z_val + 1.0f) * 0.5f;
+            if (z_val < -0.85f) {
+                lt = (z_val + 1.0f) * 0.5f;
+            } else if (std::fabs(rx_cand) > 0.05f || std::fabs(ry_cand) > 0.05f) {
+                if (z_val > 0.01f) lt = z_val;
+            }
         }
-        if (rt <= 0.01f && (std::fabs(rx_cand) > 0.02f || std::fabs(ry_cand) > 0.02f)) {
+        if (rt <= 0.01f) {
             float rz_val = axis(AMOTION_EVENT_AXIS_RZ);
-            if (rz_val > 0.01f) rt = rz_val;
-            else if (rz_val > -0.9f && rz_val < 0.0f) rt = (rz_val + 1.0f) * 0.5f;
+            if (rz_val < -0.85f) {
+                rt = (rz_val + 1.0f) * 0.5f;
+            } else if (std::fabs(rx_cand) > 0.05f || std::fabs(ry_cand) > 0.05f) {
+                if (rz_val > 0.01f) rt = rz_val;
+            }
         }
         leftTrigger_ = lt;
         rightTrigger_ = rt;

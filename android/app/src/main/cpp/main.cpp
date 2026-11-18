@@ -25,6 +25,7 @@
 #include "universal_gpu_loader.h"
 #include "nfs_widescreen.h"
 #include "gamepad_camera.h"
+#include "gamepad_input_bridge.h"
 
 static android_app* s_active_app = nullptr;
 android_app* getActiveAndroidApp() {
@@ -299,6 +300,7 @@ static void publishPad(){
     }
     if(s_roam_stick) s_roam_stick(state.rightX, state.rightY);
     nfs_gamepad_camera_feed(state.rightX, state.rightY);
+    nfs_gamepad_bridge_feed_camera(state.rightX, state.rightY);
 }
 static void onCommand(android_app* app, int32_t command) {
     auto& h = *static_cast<Host*>(app->userData);
@@ -325,11 +327,13 @@ static int32_t onInput(android_app*,AInputEvent* event){
     int32_t type=AInputEvent_getType(event);
     gamepad.setKeyEmulation(!guestGamepadInUse());
     if(type==AINPUT_EVENT_TYPE_MOTION){
+        nfs_gamepad_bridge_on_motion(event);
         nfs_gamepad_camera_on_motion(event);
         if(!acceptedGamepad(event))return 0;
         bool handled=gamepad.motion(event,guestDrivingControls(),setPadKey);if(handled){notePadUse(event);publishPad();}return handled?1:0;
     }
     if(type!=AINPUT_EVENT_TYPE_KEY)return 0;
+    nfs_gamepad_bridge_on_key(event);
     // Any key of an accepted pad, whatever source it reports (pads in keyboard
     // mode send KEYBOARD); keys it does not map fall through to the table below.
     if(acceptedGamepad(event)&&gamepad.key(event,guestDrivingControls(),setPadKey)){notePadUse(event);publishPad();return 1;}
@@ -509,6 +513,7 @@ static void configurePipelineCache(android_app* app){
 }
 void android_main(android_app* app) {
     s_active_app = app;
+    nfs_gamepad_bridge_init(app->activity ? app->activity->vm : nullptr);
     configurePipelineCache(app);
     Host host; app->userData = &host; app->onAppCmd = onCommand;app->onInputEvent=onInput;
     try {

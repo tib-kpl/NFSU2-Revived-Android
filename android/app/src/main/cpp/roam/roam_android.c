@@ -1414,6 +1414,7 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
 }
 
 /* Gamepad Right Stick Quick Chat Input & Camera Look */
+__attribute__((visibility("default")))
 void roam_stick_input(float x, float y) {
     g_stick_x = x;
     g_stick_y = y;
@@ -1450,6 +1451,11 @@ void roam_stick_input(float x, float y) {
     atomic_store(&g_say_pick, phrase);
 }
 
+__attribute__((visibility("default")))
+void nfs_roam_stick_input(float x, float y) {
+    roam_stick_input(x, y);
+}
+
 /* JNI Interface */
 #ifdef __cplusplus
 extern "C" {
@@ -1473,6 +1479,14 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
     roam_android_patch_carpool();
     roam_android_install_hooks();
+
+    // Register roam stick input with the gamepad camera engines
+    typedef void (*RegisterRoamFn)(void (*)(float, float));
+    RegisterRoamFn reg_engine = (RegisterRoamFn)dlsym(RTLD_DEFAULT, "nfs_controller_camera_register_roam_stick");
+    if (reg_engine) reg_engine(roam_stick_input);
+    RegisterRoamFn reg_bridge = (RegisterRoamFn)dlsym(RTLD_DEFAULT, "nfs_register_roam_stick_handler");
+    if (reg_bridge) reg_bridge(roam_stick_input);
+
     return JNI_VERSION_1_6;
 }
 
