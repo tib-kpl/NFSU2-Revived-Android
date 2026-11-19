@@ -41,7 +41,8 @@ public final class GameOptions {
             STARTUP_MOVIES = "intro", CUTSCENE_BORDERS = "cutscene_borders",
             ROAM_CARS_LIMIT = "roam_max_cars", ROAM_CREW = "roam_crew",
             GRAPHICS_BACKEND = "graphics_backend", DRAW_DISTANCE = "draw_distance",
-            TRACKSIDE_CROWDS = "trackside_crowds", REGION = "region", SPEEDOMETER = "speedometer", PAD_LAYOUT = "pad_layout";
+            TRACKSIDE_CROWDS = "trackside_crowds", REGION = "region", SPEEDOMETER = "speedometer", PAD_LAYOUT = "pad_layout",
+            AUTO_LAUNCH = "auto_launch";
 
     static final Option[] ALL = {
             new Option(GRAPHICS_BACKEND, R.string.opt_graphics_api, "auto",
@@ -76,28 +77,31 @@ public final class GameOptions {
                     new String[] {"port", "console"},
                     new int[] {R.string.val_pad_xbox, R.string.val_pad_ps2},
                     new String[2]),
+            new Option(AUTO_LAUNCH, R.string.opt_auto_launch, "on",
+                    new String[] {"on", "off"},
+                    new int[] {R.string.val_on, R.string.val_off},
+                    new String[2]),
     };
 
     private static final String PREFS = "nfsu2_game";
 
-    /** Volume root holding the nfsu2 folder; empty preference means the primary (internal) storage. */
-    static final String GAME_STORAGE = "game_storage";
-    private static volatile java.io.File storageRoot;
+    /** Custom game folder chosen by the player; empty preference means the default nfsu2 folder on internal storage. */
+    static final String GAME_DIR = "game_dir";
+    private static volatile java.io.File customGameDir;
 
     static void loadStorage(Context context) {
-        String path = prefs(context).getString(GAME_STORAGE, "");
-        java.io.File dir = path.isEmpty() ? null : new java.io.File(path);
-        storageRoot = dir != null && dir.isDirectory() ? dir : null;
+        String path = prefs(context).getString(GAME_DIR, "");
+        customGameDir = path.isEmpty() ? null : new java.io.File(path);
     }
 
-    static java.io.File storageRoot() {
-        java.io.File root = storageRoot;
-        return root != null ? root : android.os.Environment.getExternalStorageDirectory();
+    /** The chosen folder, or null for the default location. */
+    static java.io.File customGameDir() {
+        return customGameDir;
     }
 
-    /** Pass null to go back to the internal storage. */
-    static void setStorage(Context context, java.io.File dir) {
-        prefs(context).edit().putString(GAME_STORAGE, dir == null ? "" : dir.getAbsolutePath()).apply();
+    /** Pass null to go back to the default location. */
+    static void setGameDir(Context context, java.io.File dir) {
+        prefs(context).edit().putString(GAME_DIR, dir == null ? "" : dir.getAbsolutePath()).apply();
         loadStorage(context);
     }
 

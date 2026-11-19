@@ -42,6 +42,8 @@ jobs:
           tar -xzf /tmp/lib_arm64.tar.gz -C android/app/src/main/jniLibs/arm64-v8a
           rm -f /tmp/lib_arm64.tar.gz
           ls -la android/app/src/main/jniLibs/arm64-v8a
+          # The prebuilt runtime hardcodes its data folder; make it relative so any game folder works.
+          python3 scripts/patch_game_root.py android/app/src/main/jniLibs/arm64-v8a/libnfsu2_android.so
 
       - name: Build Rust Native Modules (perf_cores, roam_rs, and graphics_cache)
         continue-on-error: true
@@ -120,6 +122,11 @@ jobs:
             -lm -llog -ldl \
             -o android/app/src/main/jniLibs/arm64-v8a/libnfsu2_roam.so
           ls -lh android/app/src/main/jniLibs/arm64-v8a/libnfsu2_roam.so
+
+          echo "Building game folder helper (libnfsu2_pathfix.so)..."
+          $CLANG_BIN -std=c11 -O2 -shared -fPIC \
+            android/app/src/main/cpp/pathfix/pathfix.c \
+            -o android/app/src/main/jniLibs/arm64-v8a/libnfsu2_pathfix.so
 
           echo "Building AdrenoTools Hook Libraries and Diagnostics..."
           chmod +x scripts/build_adrenotools_hooks.sh

@@ -130,4 +130,9 @@
     <string name="storage_internal">Internal storage</string>
     <string name="storage_external">SD card (%1$s)</string>
     <string name="status_location">Game files: %1$s</string>
+    <string name="storage_other">Other folder…</string>
+    <string name="storage_custom">Custom folder</string>
+    <string name="storage_folder_invalid">This folder cannot be used as the game folder.</string>
+    <string name="opt_auto_launch">Launch game automatically</string>
+    <string name="auto_launching">Starting the game… Touch the screen to cancel.</string>
 </resources>

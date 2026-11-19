@@ -38,7 +38,7 @@ import java.util.concurrent.Executors;
  * right (Vulkan driver, resolution, frame cap, widescreen, compatibility).
  */
 public final class LauncherActivity extends Activity {
-    private static final int REQUEST_DRIVER_ZIP = 45, REQUEST_DRIVER_PROBE = 46;
+    private static final int REQUEST_GAME_DIR = 46, REQUEST_DRIVER_ZIP = 45, REQUEST_DRIVER_PROBE = 46;
     // NFSU2 Revived Theme (inspired by nfsu2-web: dark asphalt, carbon grey, electric lime).
     private static final int ACCENT = 0xFFC8F088; // NFSU2 menu electric lime
     private static final int BG_PANEL = 0xFF1C1C1C;
@@ -67,6 +67,15 @@ public final class LauncherActivity extends Activity {
     private TextView status;
     private Button play, access, downloadFiles;
     private boolean playAfterProbe, checkingUpdates, resumed;
+    /** Auto-launch is considered once per launcher process, so coming back from the game never restarts it. */
+    private static boolean autoLaunchHandled;
+    private static final long AUTO_LAUNCH_DELAY_MS = 2500;
+    private boolean filesReady, showingWhatsNew, autoLaunchPending;
+    private final Runnable autoLaunch = () -> {
+        if (!autoLaunchPending || !resumed) return;
+        autoLaunchPending = false;
+        launch();
+    };
     private String updateLaterTag;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -134,7 +143,7 @@ public final class LauncherActivity extends Activity {
         applyDisplayRefreshRate();
         checkUpdates(false);
         String updated = ReleaseUpdates.pendingWhatsNew(this);
-        if (updated != null) showWhatsNew(updated);
+        if (updated != null) { showingWhatsNew = true; showWhatsNew(updated); }
     }
 
     /** First launch after an update: the installed version's release notes from GitHub. */
@@ -173,10 +182,42 @@ public final class LauncherActivity extends Activity {
             Diagnostics.acknowledgeCrashes(this);
             autosaveDiagnostic(crash);
         }
+        if (!autoLaunchHandled) {
+            autoLaunchHandled = true;
+            if (crash == null) scheduleAutoLaunch();
+        }
+    }
+
+    /** Starts the game shortly after the launcher opens when the game files are known and ready. */
+    private void scheduleAutoLaunch() {
+        if (!filesReady || showingWhatsNew || !"on".equals(GameOptions.get(this, GameOptions.AUTO_LAUNCH))) return;
+        autoLaunchPending = true;
+        status.setText(getString(R.string.auto_launching));
+        main.postDelayed(autoLaunch, AUTO_LAUNCH_DELAY_MS);
+    }
+
+    /** Any touch, key or pad press, or a dialog, cancels the pending automatic start. */
+    private void cancelAutoLaunch() {
+        if (!autoLaunchPending) return;
+        autoLaunchPending = false;
+        main.removeCallbacks(autoLaunch);
+        refresh();
+    }
+
+    @Override public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+        if (event.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) cancelAutoLaunch();
+        return super.dispatchTouchEvent(event);
+    }
+
+    @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) cancelAutoLaunch();
+        return super.dispatchKeyEvent(event);
     }
 
     @Override protected void onPause() {
         resumed = false;
+        autoLaunchPending = false;
+        main.removeCallbacks(autoLaunch);
         super.onPause();
     }
 
@@ -276,8 +317,9 @@ public final class LauncherActivity extends Activity {
             if (!(allowed && new File(root, folder).isDirectory())) missing.append(missing.length() == 0 ? "" : ", ").append(folder);
         addCheck(missing.length() == 0 ? getString(R.string.game_folders) : getString(R.string.missing_folders, missing), missing.length() == 0, true);
         boolean ready = exe && !languages().isEmpty();
+        filesReady = ready;
         status.setText(!allowed ? getString(R.string.status_allow_access)
-                : ready ? getString(R.string.status_location, root.getAbsolutePath()) : getString(R.string.status_copy_files, new File(GameOptions.storageRoot(), "nfsu2").getAbsolutePath()));
+                : ready ? getString(R.string.status_location, root.getAbsolutePath()) : getString(R.string.status_copy_files, gameRoot().getAbsolutePath()));
         play.setEnabled(ready);
         play.setAlpha(ready ? 1f : .45f);
         access.setVisibility(allowed ? View.GONE : View.VISIBLE);
@@ -383,8 +425,10 @@ public final class LauncherActivity extends Activity {
                 }
 
                 main.post(() -> status.setText(getString(R.string.extracting_files)));
-                File destDir = GameOptions.storageRoot();
-                extractZip(targetZip, destDir);
+                // The archive holds a top-level nfsu2 folder; a custom folder named differently is filled directly.
+                File custom = GameOptions.customGameDir();
+                if (custom == null) extractZip(targetZip, Environment.getExternalStorageDirectory());
+                else extractZip(targetZip, custom, "nfsu2/");
 
                 main.post(() -> {
                     status.setText(getString(R.string.files_installed));
@@ -402,11 +446,20 @@ public final class LauncherActivity extends Activity {
     }
 
     private static void extractZip(File zipFile, File destDir) throws Exception {
+        extractZip(zipFile, destDir, null);
+    }
+
+    /** Extracts into destDir; entries under {@code stripPrefix} (case-insensitive) lose that prefix. */
+    private static void extractZip(File zipFile, File destDir, String stripPrefix) throws Exception {
         byte[] buffer = new byte[32768];
         try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(new java.io.FileInputStream(zipFile))) {
             java.util.zip.ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
-                File target = new File(destDir, entry.getName());
+                String entryName = entry.getName();
+                if (stripPrefix != null && entryName.regionMatches(true, 0, stripPrefix, 0, stripPrefix.length()))
+                    entryName = entryName.substring(stripPrefix.length());
+                if (entryName.isEmpty()) { zis.closeEntry(); continue; }
+                File target = new File(destDir, entryName);
                 if (entry.isDirectory()) {
                     target.mkdirs();
                 } else {
@@ -496,7 +549,7 @@ public final class LauncherActivity extends Activity {
         if (android.os.Process.is64Bit())
             optionsList.addView(optionRow(getString(R.string.opt_vulkan_driver), driver == null ? getString(R.string.system_default) : driver.name, this::chooseDriver));
         optionsList.addView(optionRow(getString(R.string.opt_check_driver), getString(R.string.opt_check_driver_sub), () -> probeDriver(false)));
-        optionsList.addView(optionRow(getString(R.string.opt_storage), storageLabel(GameOptions.storageRoot()), this::chooseStorage));
+        optionsList.addView(optionRow(getString(R.string.opt_storage), storageSummary(), this::chooseStorage));
         optionsList.addView(optionRow(getString(R.string.opt_language), languageLabel(), this::chooseLanguage));
         for (GameOptions.Option option : GameOptions.ALL)
             optionsList.addView(optionRow(option.title(this), option.label(this, GameOptions.get(this, option.key)), () -> chooseOption(option)));
@@ -874,7 +927,16 @@ public final class LauncherActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_DRIVER_PROBE) {
+        if (requestCode == REQUEST_GAME_DIR) {
+            File picked = resultCode == RESULT_OK && data != null && data.getData() != null ? treeUriToFile(data.getData()) : null;
+            if (resultCode != RESULT_OK) return;
+            if (picked == null || !(picked.isDirectory() || picked.mkdirs())) {
+                message(getString(R.string.opt_storage), getString(R.string.storage_folder_invalid));
+                return;
+            }
+            GameOptions.setGameDir(this, picked);
+            refresh();
+        } else if (requestCode == REQUEST_DRIVER_PROBE) {
             showDriverReport(resultCode == RESULT_OK && data != null ? data.getStringExtra("gpu_report")
                     : "{\"probeError\":" + org.json.JSONObject.quote(getString(R.string.probe_cancelled)) + ",\"driverLoadFailed\":true}");
         } else if (requestCode == REQUEST_DRIVER_ZIP && resultCode == RESULT_OK && data != null && data.getData() != null) {
@@ -935,6 +997,7 @@ public final class LauncherActivity extends Activity {
                 if (result.tag.equals(updates.getString("skip_update_tag", ""))) return;
                 if (result.tag.equals(updateLaterTag)) return;
             }
+            cancelAutoLaunch();
             int updateTitle = result.isPrerelease ? R.string.new_prerelease : R.string.new_release;
             new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                     .setTitle(getString(updateTitle, result.tag))
@@ -1103,13 +1166,15 @@ public final class LauncherActivity extends Activity {
     // ---- Storage ---------------------------------------------------------------------------------------
 
     public static File gameRoot() {
-        File storage = GameOptions.storageRoot();
+        File custom = GameOptions.customGameDir();
+        if (custom != null) return custom;
+        File storage = Environment.getExternalStorageDirectory();
         File f = new File(storage, "NFSU2");
         if (f.isDirectory()) return f;
         return new File(storage, "nfsu2");
     }
 
-    /** One entry per mounted volume: the primary storage first, then SD cards / USB drives. */
+    /** Mounted volumes: the primary storage first, then SD cards / USB drives. */
     private List<File> storageVolumes() {
         List<File> roots = new ArrayList<>();
         roots.add(Environment.getExternalStorageDirectory());
@@ -1123,24 +1188,63 @@ public final class LauncherActivity extends Activity {
         return roots;
     }
 
-    private String storageLabel(File root) {
+    private String volumeLabel(File root) {
         return root.equals(Environment.getExternalStorageDirectory())
                 ? getString(R.string.storage_internal) : getString(R.string.storage_external, root.getName());
     }
 
-    private void chooseStorage() {
-        List<File> volumes = storageVolumes();
-        String[] names = new String[volumes.size()];
-        int checked = 0;
-        for (int i = 0; i < names.length; i++) {
-            names[i] = storageLabel(volumes.get(i)) + "\n" + volumes.get(i).getAbsolutePath() + "/nfsu2";
-            if (volumes.get(i).equals(GameOptions.storageRoot())) checked = i;
+    /** Value shown on the settings row. */
+    private String storageSummary() {
+        File custom = GameOptions.customGameDir();
+        return custom == null ? getString(R.string.storage_internal) : custom.getAbsolutePath();
+    }
+
+    /** Converts a document-tree URI from the folder picker to a real path (all-files access is granted). */
+    private static File treeUriToFile(Uri tree) {
+        try {
+            String id = android.provider.DocumentsContract.getTreeDocumentId(tree);
+            int colon = id.indexOf(':');
+            if (colon < 0) return null;
+            String volume = id.substring(0, colon), relative = id.substring(colon + 1);
+            File base = "primary".equals(volume) ? Environment.getExternalStorageDirectory() : new File("/storage/" + volume);
+            return relative.isEmpty() ? base : new File(base, relative);
+        } catch (Exception e) {
+            return null;
         }
+    }
+
+    private void chooseStorage() {
+        List<String> names = new ArrayList<>();
+        List<File> dirs = new ArrayList<>();   // null entry = default location
+        names.add(getString(R.string.storage_internal) + "\n" + new File(Environment.getExternalStorageDirectory(), "nfsu2").getAbsolutePath());
+        dirs.add(null);
+        for (File root : storageVolumes()) {
+            if (root.equals(Environment.getExternalStorageDirectory())) continue;
+            File[] presets = {new File(root, "nfsu2"), new File(new File(root, "ROMS/PC"), "nfsu2")};
+            for (int i = 0; i < presets.length; i++) {
+                if (i == 1 && !presets[1].getParentFile().isDirectory()) continue;
+                names.add(volumeLabel(root) + "\n" + presets[i].getAbsolutePath());
+                dirs.add(presets[i]);
+            }
+        }
+        File custom = GameOptions.customGameDir();
+        if (custom != null && !dirs.contains(custom)) {
+            names.add(getString(R.string.storage_custom) + "\n" + custom.getAbsolutePath());
+            dirs.add(custom);
+        }
+        int checked = Math.max(0, dirs.indexOf(custom));
+        names.add(getString(R.string.storage_other));
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(getString(R.string.opt_storage))
-                .setSingleChoiceItems(names, checked, (dialog, which) -> {
-                    File picked = volumes.get(which);
-                    GameOptions.setStorage(this, picked.equals(Environment.getExternalStorageDirectory()) ? null : picked);
-                    dialog.dismiss(); refresh();
+                .setSingleChoiceItems(names.toArray(new String[0]), checked, (dialog, which) -> {
+                    dialog.dismiss();
+                    if (which == dirs.size()) {
+                        startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_GAME_DIR);
+                        return;
+                    }
+                    File picked = dirs.get(which);
+                    if (picked != null) picked.mkdirs();
+                    GameOptions.setGameDir(this, picked);
+                    refresh();
                 }).setNegativeButton(getString(R.string.cancel), null).show();
     }
 

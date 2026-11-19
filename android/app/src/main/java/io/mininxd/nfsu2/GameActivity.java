@@ -362,6 +362,8 @@ public final class GameActivity extends NativeActivity {
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
     }
     @Override protected void onCreate(Bundle saved) {
+        // The native runtime opens its data relative to the working directory: enter the chosen game folder first.
+        StorageFix.enter(LauncherActivity.gameRoot());
         super.onCreate(saved);
         s_instance = this;
         refreshNewsAsync();
