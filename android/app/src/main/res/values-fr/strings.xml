@@ -129,9 +129,8 @@
     <string name="diag_title">Diagnostics et rapport de bug</string>
     <string name="opt_storage">Emplacement des fichiers du jeu</string>
     <string name="storage_internal">Stockage interne</string>
-    <string name="storage_external">Carte SD (%1$s)</string>
     <string name="status_location">Fichiers du jeu : %1$s</string>
-    <string name="storage_other">Autre dossier…</string>
+    <string name="storage_other">Choisir un dossier…</string>
     <string name="storage_custom">Dossier personnalisé</string>
     <string name="storage_folder_invalid">Ce dossier ne peut pas être utilisé comme dossier du jeu.</string>
     <string name="opt_auto_launch">Lancer le jeu automatiquement</string>

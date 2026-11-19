@@ -1174,25 +1174,6 @@ public final class LauncherActivity extends Activity {
         return new File(storage, "nfsu2");
     }
 
-    /** Mounted volumes: the primary storage first, then SD cards / USB drives. */
-    private List<File> storageVolumes() {
-        List<File> roots = new ArrayList<>();
-        roots.add(Environment.getExternalStorageDirectory());
-        File[] appDirs = getExternalFilesDirs(null);
-        for (int i = 1; appDirs != null && i < appDirs.length; i++) {
-            if (appDirs[i] == null) continue;
-            String path = appDirs[i].getAbsolutePath();
-            int cut = path.indexOf("/Android/");
-            if (cut > 0 && new File(path.substring(0, cut)).isDirectory()) roots.add(new File(path.substring(0, cut)));
-        }
-        return roots;
-    }
-
-    private String volumeLabel(File root) {
-        return root.equals(Environment.getExternalStorageDirectory())
-                ? getString(R.string.storage_internal) : getString(R.string.storage_external, root.getName());
-    }
-
     /** Value shown on the settings row. */
     private String storageSummary() {
         File custom = GameOptions.customGameDir();
@@ -1214,37 +1195,21 @@ public final class LauncherActivity extends Activity {
     }
 
     private void chooseStorage() {
-        List<String> names = new ArrayList<>();
-        List<File> dirs = new ArrayList<>();   // null entry = default location
-        names.add(getString(R.string.storage_internal) + "\n" + new File(Environment.getExternalStorageDirectory(), "nfsu2").getAbsolutePath());
-        dirs.add(null);
-        for (File root : storageVolumes()) {
-            if (root.equals(Environment.getExternalStorageDirectory())) continue;
-            File[] presets = {new File(root, "nfsu2"), new File(new File(root, "ROMS/PC"), "nfsu2")};
-            for (int i = 0; i < presets.length; i++) {
-                if (i == 1 && !presets[1].getParentFile().isDirectory()) continue;
-                names.add(volumeLabel(root) + "\n" + presets[i].getAbsolutePath());
-                dirs.add(presets[i]);
-            }
-        }
         File custom = GameOptions.customGameDir();
-        if (custom != null && !dirs.contains(custom)) {
-            names.add(getString(R.string.storage_custom) + "\n" + custom.getAbsolutePath());
-            dirs.add(custom);
-        }
-        int checked = Math.max(0, dirs.indexOf(custom));
+        List<String> names = new ArrayList<>();
+        names.add(getString(R.string.storage_internal) + "\n" + new File(Environment.getExternalStorageDirectory(), "nfsu2").getAbsolutePath());
+        if (custom != null) names.add(getString(R.string.storage_custom) + "\n" + custom.getAbsolutePath());
         names.add(getString(R.string.storage_other));
+        int pickRow = names.size() - 1;
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(getString(R.string.opt_storage))
-                .setSingleChoiceItems(names.toArray(new String[0]), checked, (dialog, which) -> {
+                .setSingleChoiceItems(names.toArray(new String[0]), custom == null ? 0 : 1, (dialog, which) -> {
                     dialog.dismiss();
-                    if (which == dirs.size()) {
+                    if (which == pickRow) {
                         startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_GAME_DIR);
-                        return;
+                    } else if (which == 0 && custom != null) {
+                        GameOptions.setGameDir(this, null);
+                        refresh();
                     }
-                    File picked = dirs.get(which);
-                    if (picked != null) picked.mkdirs();
-                    GameOptions.setGameDir(this, picked);
-                    refresh();
                 }).setNegativeButton(getString(R.string.cancel), null).show();
     }
 

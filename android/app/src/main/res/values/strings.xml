@@ -128,9 +128,8 @@
     <string name="diag_title">Diagnostics &amp; Bug Report</string>
     <string name="opt_storage">Game files location</string>
     <string name="storage_internal">Internal storage</string>
-    <string name="storage_external">SD card (%1$s)</string>
     <string name="status_location">Game files: %1$s</string>
-    <string name="storage_other">Other folder…</string>
+    <string name="storage_other">Choose a folder…</string>
     <string name="storage_custom">Custom folder</string>
     <string name="storage_folder_invalid">This folder cannot be used as the game folder.</string>
     <string name="opt_auto_launch">Launch game automatically</string>
