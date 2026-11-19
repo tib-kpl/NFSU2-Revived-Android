@@ -52,7 +52,7 @@
     <string name="open_github">Ouvrir GitHub</string>
     <string name="opt_check_driver">Vérifier le pilote</string>
     <string name="opt_check_driver_sub">GPU, API graphique et infos du pilote</string>
-    <string name="opt_check_updates">Rechercher des mises à jour</string>
+    <string name="opt_check_updates">Mises à jour</string>
     <string name="opt_display_logs">Afficher les journaux</string>
     <string name="opt_draw_distance">Distance d\'affichage</string>
     <string name="opt_fps">Limite de FPS</string>
