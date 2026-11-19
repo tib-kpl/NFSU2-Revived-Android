@@ -72,7 +72,7 @@ public final class LauncherActivity extends Activity {
     private static final long AUTO_LAUNCH_DELAY_MS = 2500;
     /** The native runtime only accepts the unprotected v1.2 US executable (see README "Supported executable"). */
     private static final long EXPECTED_EXE_SIZE = 4800512L;
-    private boolean filesReady, showingWhatsNew, autoLaunchPending;
+    private boolean filesReady, autoLaunchPending;
     private final Runnable autoLaunch = () -> {
         if (!autoLaunchPending || !resumed) return;
         autoLaunchPending = false;
@@ -144,32 +144,6 @@ public final class LauncherActivity extends Activity {
         setContentView(buildScreen());
         applyDisplayRefreshRate();
         checkUpdates(false);
-        String updated = ReleaseUpdates.pendingWhatsNew(this);
-        if (updated != null) { showingWhatsNew = true; showWhatsNew(updated); }
-    }
-
-    /** First launch after an update: the installed version's release notes from GitHub. */
-    private void showWhatsNew(String version) {
-        // Shown once per update: mark it seen now, so leaving the launcher without closing it does not bring it back.
-        ReleaseUpdates.whatsNewSeen(this);
-        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(getString(R.string.updated_to_version, version))
-                .setMessage(getString(R.string.loading_whats_new))
-                .setPositiveButton(getString(R.string.ok), (d, which) -> ReleaseUpdates.whatsNewSeen(this))
-                .setNeutralButton(getString(R.string.view_on_github), (d, which) -> {
-                    ReleaseUpdates.whatsNewSeen(this);
-                    openUrl(Uri.parse("https://github.com/mininxd/NFSU2-Revived-Android/releases/tag/v" + Uri.encode(version)));
-                })
-                .setOnCancelListener(d -> ReleaseUpdates.whatsNewSeen(this))
-                .show();
-        ReleaseUpdates.releaseNotes(this, version, notes -> {
-            if (!dialog.isShowing()) return;
-            // In the app, skip the download/install preamble of the release page.
-            int start = notes == null ? -1 : Math.max(notes.indexOf("What's new"), notes.indexOf("Novedades"));
-            if (start > 0) notes = notes.substring(start);
-            dialog.setMessage(notes != null ? notes
-                    : getString(R.string.whats_new_failed));
-        });
     }
 
     @Override protected void onResume() {
@@ -194,7 +168,7 @@ public final class LauncherActivity extends Activity {
 
     /** Starts the game shortly after the launcher opens when the game files are known and ready. */
     private void scheduleAutoLaunch() {
-        if (!filesReady || showingWhatsNew || !"on".equals(GameOptions.get(this, GameOptions.AUTO_LAUNCH))) return;
+        if (!filesReady || !"on".equals(GameOptions.get(this, GameOptions.AUTO_LAUNCH))) return;
         autoLaunchPending = true;
         status.setText(getString(R.string.auto_launching));
         main.postDelayed(autoLaunch, AUTO_LAUNCH_DELAY_MS);

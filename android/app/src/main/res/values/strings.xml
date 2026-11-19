@@ -38,7 +38,6 @@
     <string name="invalid_diagnostic">Invalid diagnostic: %1$s</string>
     <string name="invalid_server">\"%1$s\" is not a valid server name.</string>
     <string name="later">Later</string>
-    <string name="loading_whats_new">Loading what\'s new…</string>
     <string name="log_failed">Could not prepare log: %1$s</string>
     <string name="missing_folders">Missing folders: %1$s</string>
     <string name="new_prerelease">New Pre-Release available: %1$s</string>
@@ -100,7 +99,6 @@
     <string name="up_to_date">You have version %1$s (%2$s channel).\nThere is no newer version on GitHub.</string>
     <string name="update">Update</string>
     <string name="update_message">Channel: %1$s\n\nYou can download it from GitHub or keep playing with this version. Install the APK over the current one to preserve your saves and settings.</string>
-    <string name="updated_to_version">Updated to version %1$s!</string>
     <string name="updates">Updates</string>
     <string name="use_system_driver">Use system driver</string>
     <string name="val_auto">Auto</string>
@@ -119,9 +117,7 @@
     <string name="val_ultra_performance">Ultra Performance</string>
     <string name="val_uncapped">Uncapped</string>
     <string name="version_n">Version %1$s</string>
-    <string name="view_on_github">View on GitHub</string>
     <string name="vulkan_init_error">error initializing Vulkan.</string>
-    <string name="whats_new_failed">Could not load what\'s new (offline or not published yet). You can view them on GitHub.</string>
     <string name="zip_attach_hint">You can attach or send this file for troubleshooting.</string>
     <string name="zip_saved">Diagnostic ZIP successfully saved to:\n• %1$s</string>
     <string name="play_anyway">Play anyway</string>

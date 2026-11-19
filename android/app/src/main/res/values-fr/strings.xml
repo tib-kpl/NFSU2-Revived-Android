@@ -39,7 +39,6 @@
     <string name="invalid_diagnostic">Diagnostic invalide : %1$s</string>
     <string name="invalid_server">« %1$s » n\'est pas un nom de serveur valide.</string>
     <string name="later">Plus tard</string>
-    <string name="loading_whats_new">Chargement des nouveautés…</string>
     <string name="log_failed">Impossible de préparer le journal : %1$s</string>
     <string name="missing_folders">Dossiers manquants : %1$s</string>
     <string name="new_prerelease">Nouvelle préversion disponible : %1$s</string>
@@ -101,7 +100,6 @@
     <string name="up_to_date">Vous avez la version %1$s (canal %2$s).\nIl n\'y a pas de version plus récente sur GitHub.</string>
     <string name="update">Mettre à jour</string>
     <string name="update_message">Canal : %1$s\n\nVous pouvez la télécharger depuis GitHub ou continuer à jouer avec cette version. Installez l\'APK par-dessus l\'actuel pour conserver vos sauvegardes et vos réglages.</string>
-    <string name="updated_to_version">Mis à jour vers la version %1$s !</string>
     <string name="updates">Mises à jour</string>
     <string name="use_system_driver">Utiliser le pilote système</string>
     <string name="val_auto">Auto</string>
@@ -120,9 +118,7 @@
     <string name="val_ultra_performance">Ultra performance</string>
     <string name="val_uncapped">Illimité</string>
     <string name="version_n">Version %1$s</string>
-    <string name="view_on_github">Voir sur GitHub</string>
     <string name="vulkan_init_error">erreur d\'initialisation de Vulkan.</string>
-    <string name="whats_new_failed">Impossible de charger les nouveautés (hors ligne ou pas encore publiées). Vous pouvez les consulter sur GitHub.</string>
     <string name="zip_attach_hint">Vous pouvez joindre ou envoyer ce fichier pour le dépannage.</string>
     <string name="zip_saved">ZIP de diagnostic enregistré avec succès dans :\n• %1$s</string>
     <string name="play_anyway">Jouer quand même</string>
