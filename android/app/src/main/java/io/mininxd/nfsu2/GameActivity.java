@@ -323,11 +323,11 @@ public final class GameActivity extends NativeActivity {
         GameOptions.Option option=GameOptions.find(GameOptions.FPS);
         String saved=GameOptions.get(this,GameOptions.FPS);int selected=0;
         for(int i=0;i<option.values.length;i++)if(option.values[i].equals(saved))selected=i;
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(option.title)
-                .setSingleChoiceItems(option.labels,selected,(dialog,which)->{
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(option.title(this))
+                .setSingleChoiceItems(option.labels(this),selected,(dialog,which)->{
                     GameOptions.set(this,GameOptions.FPS,option.values[which]);
                     nativeFrameLimit(Integer.parseInt(option.values[which]));dialog.dismiss();
-                }).setNegativeButton("Cancel",null).show();
+                }).setNegativeButton(R.string.cancel,null).show();
     }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private void showTextInput() {

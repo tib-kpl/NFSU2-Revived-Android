@@ -9,12 +9,25 @@ import android.content.SharedPreferences;
  */
 public final class GameOptions {
     static final class Option {
-        final String key, title, defaultValue;
-        final String[] values, labels;
-        Option(String key, String title, String defaultValue, String[] values, String[] labels) {
-            this.key = key; this.title = title; this.defaultValue = defaultValue; this.values = values; this.labels = labels;
+        final String key, defaultValue;
+        final int titleRes;
+        final String[] values;
+        /** Label resources, or null when the labels are language-neutral (e.g. "75%"). */
+        private final int[] labelRes;
+        private final String[] literalLabels;
+        Option(String key, int titleRes, String defaultValue, String[] values, int[] labelRes, String[] literalLabels) {
+            this.key = key; this.titleRes = titleRes; this.defaultValue = defaultValue; this.values = values;
+            this.labelRes = labelRes; this.literalLabels = literalLabels;
         }
-        String label(String value) {
+        String title(Context context) { return context.getString(titleRes); }
+        String[] labels(Context context) {
+            if (labelRes == null) return literalLabels;
+            String[] out = new String[labelRes.length];
+            for (int i = 0; i < out.length; i++) out[i] = labelRes[i] == 0 ? literalLabels[i] : context.getString(labelRes[i]);
+            return out;
+        }
+        String label(Context context, String value) {
+            String[] labels = labels(context);
             for (int i = 0; i < values.length; i++) if (values[i].equals(value)) return labels[i];
             return value;
         }
@@ -31,30 +44,38 @@ public final class GameOptions {
             TRACKSIDE_CROWDS = "trackside_crowds", REGION = "region", SPEEDOMETER = "speedometer", PAD_LAYOUT = "pad_layout";
 
     static final Option[] ALL = {
-            new Option(GRAPHICS_BACKEND, "Graphics API", "auto",
+            new Option(GRAPHICS_BACKEND, R.string.opt_graphics_api, "auto",
                     new String[] {"auto", "vulkan", "opengl"},
-                    new String[] {"Auto", "Vulkan (DXVK)", "OpenGL (ES)"}),
-            new Option(RESOLUTION, "Internal Resolution", "75",
+                    new int[] {R.string.val_auto, 0, 0},
+                    new String[] {null, "Vulkan (DXVK)", "OpenGL (ES)"}),
+            new Option(RESOLUTION, R.string.opt_resolution, "75",
                     new String[] {"25", "30", "35", "40", "45", "50", "55", "60", "65", "70", "75", "80", "85", "90", "95", "100", "125", "150", "200"},
+                    null,
                     new String[] {"25%", "30%", "35%", "40%", "45%", "50%", "55%", "60%", "65%", "70%", "75%", "80%", "85%", "90%", "95%", "100%", "125%", "150%", "200%"}),
-            new Option(DRAW_DISTANCE, "Draw Distance", "performance",
+            new Option(DRAW_DISTANCE, R.string.opt_draw_distance, "performance",
                     new String[] {"ultra_performance", "performance", "balanced", "extended", "original"},
-                    new String[] {"Ultra Performance", "Performance", "Balanced", "Extended", "Original"}),
-            new Option(FPS, "FPS Limit", "30",
+                    new int[] {R.string.val_ultra_performance, R.string.val_performance, R.string.val_balanced, R.string.val_extended, R.string.val_original},
+                    new String[5]),
+            new Option(FPS, R.string.opt_fps, "30",
                     new String[] {"30", "60", "90", "120", "0"},
-                    new String[] {"30 FPS", "60 FPS", "90 FPS", "120 FPS", "Uncapped"}),
-            new Option(DISPLAY_LOGS, "Display Logs", "off",
+                    new int[] {0, 0, 0, 0, R.string.val_uncapped},
+                    new String[] {"30 FPS", "60 FPS", "90 FPS", "120 FPS", null}),
+            new Option(DISPLAY_LOGS, R.string.opt_display_logs, "off",
                     new String[] {"off", "compact", "full"},
-                    new String[] {"Off", "Compact", "Full"}),
-            new Option(WIDESCREEN, "Widescreen HUD", "off",
+                    new int[] {R.string.val_off, R.string.val_compact, R.string.val_full},
+                    new String[3]),
+            new Option(WIDESCREEN, R.string.opt_widescreen, "off",
                     new String[] {"on", "off"},
-                    new String[] {"On", "Off"}),
-            new Option(MINIMAP, "Minimap", "top",
+                    new int[] {R.string.val_on, R.string.val_off},
+                    new String[2]),
+            new Option(MINIMAP, R.string.opt_minimap, "top",
                     new String[] {"top", "bottom"},
-                    new String[] {"Top left", "Bottom left (original)"}),
-            new Option(PAD_LAYOUT, "Gamepad Layout", "port",
+                    new int[] {R.string.val_top_left, R.string.val_bottom_left},
+                    new String[2]),
+            new Option(PAD_LAYOUT, R.string.opt_pad_layout, "port",
                     new String[] {"port", "console"},
-                    new String[] {"Default Xbox", "PS2 style"}),
+                    new int[] {R.string.val_pad_xbox, R.string.val_pad_ps2},
+                    new String[2]),
     };
 
     private static final String PREFS = "nfsu2_game";
