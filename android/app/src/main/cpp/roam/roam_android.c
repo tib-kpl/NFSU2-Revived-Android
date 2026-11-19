@@ -1158,11 +1158,17 @@ static void look_camera_frame_tick(void) {
 }
 
 static void roam_android_install_hooks(void) {
+    static _Atomic int s_install_started = 0;
     if (g_hooks_installed || !g_p_recomp_lookup) return;
+    /* JNI_OnLoad and the game thread can both get here at once. A second install would hook the
+     * already-hooked entry points and overwrite the saved originals with the first hooks, so the
+     * hooks would call themselves until the stack overflows. Only one caller may install. */
+    if (atomic_exchange(&s_install_started, 1)) return;
 
     Dl_info dlinfo;
     if (!dladdr((void *)g_p_recomp_lookup, &dlinfo) || !dlinfo.dli_fbase) {
         __android_log_print(ANDROID_LOG_ERROR, "NFSU2-Hook", "Failed to resolve lib base via dladdr");
+        atomic_store(&s_install_started, 0);
         return;
     }
 
