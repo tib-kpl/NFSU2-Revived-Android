@@ -46,11 +46,6 @@ HOOKS_DIR="$ADRENOTOOLS_DIR/src/hook"
 LINKERNS_DIR="$ADRENOTOOLS_DIR/lib/linkernsbypass"
 
 if [ ! -f "$HOOKS_DIR/hook_impl.cpp" ] || [ ! -f "$LINKERNS_DIR/android_linker_ns.cpp" ]; then
-  echo "Adrenotools submodule files missing. Updating git submodules..."
-  git -C "$ROOT_DIR" submodule update --init --recursive third_party/libadrenotools || true
-fi
-
-if [ ! -f "$HOOKS_DIR/hook_impl.cpp" ] || [ ! -f "$LINKERNS_DIR/android_linker_ns.cpp" ]; then
   echo "Warning: Adrenotools source files still not found at $HOOKS_DIR. Skipping hook build."
   exit 0
 fi

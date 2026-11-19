@@ -17,9 +17,9 @@ import javax.net.ssl.HttpsURLConnection;
 
 /** Optional official GitHub updates supporting Stable and Beta channels. */
 final class ReleaseUpdates {
-    private static final String REPO = "https://github.com/mininxd/NFSU2-Revived-Android/";
-    private static final String API_RELEASES = "https://api.github.com/repos/mininxd/NFSU2-Revived-Android/releases?per_page=15";
-    private static final String API_LATEST = "https://api.github.com/repos/mininxd/NFSU2-Revived-Android/releases/latest";
+    private static final String REPO = "https://github.com/tib-kpl/NFSU2-Revived-Android/";
+    private static final String API_RELEASES = "https://api.github.com/repos/tib-kpl/NFSU2-Revived-Android/releases?per_page=15";
+    private static final String API_LATEST = "https://api.github.com/repos/tib-kpl/NFSU2-Revived-Android/releases/latest";
 
     static final String CHANNEL_KEY = "update_channel";
     static final String CHANNEL_STABLE = "stable";
@@ -89,7 +89,7 @@ final class ReleaseUpdates {
             String notes = null;
             try {
                 HttpsURLConnection connection = (HttpsURLConnection) new URL(
-                        "https://api.github.com/repos/mininxd/NFSU2-Revived-Android/releases/tags/v" + Uri.encode(version)).openConnection();
+                        "https://api.github.com/repos/tib-kpl/NFSU2-Revived-Android/releases/tags/v" + Uri.encode(version)).openConnection();
                 connection.setConnectTimeout(6000); connection.setReadTimeout(6000);
                 connection.setRequestProperty("Accept", "application/vnd.github+json");
                 connection.setRequestProperty("User-Agent", "NFSU2-Android/" + version);

@@ -11,7 +11,7 @@ To download the latest official DXVK release packages and update the port:
 # 1. Download official GitHub release assets (v3.1.1):
 bash ports/download_dxvk_release.sh v3.1.1
 
-# 2. Or update the submodule and prepare the source for Android:
+# 2. Or prepare the vendored source (ports/dxvk_modules, DXVK v3.1.1) for the source for Android:
 python3 ports/dxvk_android/prepare.py ports/dxvk_modules build/dxvk-source
 ```
 
