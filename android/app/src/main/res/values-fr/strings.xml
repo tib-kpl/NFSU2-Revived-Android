@@ -135,4 +135,6 @@
     <string name="storage_folder_invalid">Ce dossier ne peut pas être utilisé comme dossier du jeu.</string>
     <string name="opt_auto_launch">Lancer le jeu automatiquement</string>
     <string name="auto_launching">Lancement du jeu… Touchez l\'écran pour annuler.</string>
+    <string name="exe_wrong_version">SPEED2.EXE : mauvaise version (%1$d octets)</string>
+    <string name="status_wrong_exe">Ce SPEED2.EXE n\'est pas l\'exécutable v1.2 US non protégé (4 800 512 octets) requis par le jeu.</string>
 </resources>

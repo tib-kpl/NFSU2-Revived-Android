@@ -70,6 +70,8 @@ public final class LauncherActivity extends Activity {
     /** Auto-launch is considered once per launcher process, so coming back from the game never restarts it. */
     private static boolean autoLaunchHandled;
     private static final long AUTO_LAUNCH_DELAY_MS = 2500;
+    /** The native runtime only accepts the unprotected v1.2 US executable (see README "Supported executable"). */
+    private static final long EXPECTED_EXE_SIZE = 4800512L;
     private boolean filesReady, showingWhatsNew, autoLaunchPending;
     private final Runnable autoLaunch = () -> {
         if (!autoLaunchPending || !resumed) return;
@@ -311,15 +313,19 @@ public final class LauncherActivity extends Activity {
             ensureGamefilesInstalled(root);
             exe = new File(root, "SPEED2.EXE").isFile();
         }
-        addCheck("SPEED2.EXE", exe, true);
+        long exeSize = exe ? new File(root, "SPEED2.EXE").length() : 0;
+        boolean exeOk = exe && exeSize == EXPECTED_EXE_SIZE;
+        addCheck(exe && !exeOk ? getString(R.string.exe_wrong_version, exeSize) : "SPEED2.EXE", exeOk, true);
         StringBuilder missing = new StringBuilder();
         for (String folder : new String[] {"GLOBAL", "TRACKS", "CARS", "FRONTEND", "LANGUAGES"})
             if (!(allowed && new File(root, folder).isDirectory())) missing.append(missing.length() == 0 ? "" : ", ").append(folder);
         addCheck(missing.length() == 0 ? getString(R.string.game_folders) : getString(R.string.missing_folders, missing), missing.length() == 0, true);
-        boolean ready = exe && !languages().isEmpty();
+        boolean ready = exeOk && !languages().isEmpty();
         filesReady = ready;
         status.setText(!allowed ? getString(R.string.status_allow_access)
-                : ready ? getString(R.string.status_location, root.getAbsolutePath()) : getString(R.string.status_copy_files, gameRoot().getAbsolutePath()));
+                : ready ? getString(R.string.status_location, root.getAbsolutePath())
+                : exe && !exeOk ? getString(R.string.status_wrong_exe)
+                : getString(R.string.status_copy_files, gameRoot().getAbsolutePath()));
         play.setEnabled(ready);
         play.setAlpha(ready ? 1f : .45f);
         access.setVisibility(allowed ? View.GONE : View.VISIBLE);
