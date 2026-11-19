@@ -150,6 +150,8 @@ public final class LauncherActivity extends Activity {
 
     /** First launch after an update: the installed version's release notes from GitHub. */
     private void showWhatsNew(String version) {
+        // Shown once per update: mark it seen now, so leaving the launcher without closing it does not bring it back.
+        ReleaseUpdates.whatsNewSeen(this);
         AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(getString(R.string.updated_to_version, version))
                 .setMessage(getString(R.string.loading_whats_new))
