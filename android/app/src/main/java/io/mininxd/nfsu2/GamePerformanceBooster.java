@@ -70,7 +70,7 @@ public final class GamePerformanceBooster {
             File cacheDir = new File(activity.getCacheDir(), "dxvk-v2");
             if (nativeDxvkLoaded) {
                 try {
-                    nativeConfigureDxvkAndDriver(cacheDir.getAbsolutePath(), "/sdcard/nfsu2");
+                    nativeConfigureDxvkAndDriver(cacheDir.getAbsolutePath(), LauncherActivity.gameRoot().getAbsolutePath());
                     Log.i(TAG, "Configured low-overhead DXVK profile via native Rust tuner");
                 } catch (Throwable t) {
                     Log.w(TAG, "nativeConfigureDxvkAndDriver failed: " + t.getMessage());

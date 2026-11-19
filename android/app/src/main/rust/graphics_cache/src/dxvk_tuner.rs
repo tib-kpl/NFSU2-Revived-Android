@@ -206,7 +206,12 @@ pub fn apply_driver_environment() {
     }
 
     // Auto-generate dxvk.conf in game folders if accessible
-    let candidate_dirs = ["/sdcard/nfsu2", "/storage/emulated/0/nfsu2", "."];
+    let data_dir = std::env::var("NFSU2_DATA_DIR").unwrap_or_default();
+    let mut candidate_dirs: Vec<&str> = Vec::new();
+    if !data_dir.is_empty() {
+        candidate_dirs.push(&data_dir);
+    }
+    candidate_dirs.extend(["/sdcard/nfsu2", "/storage/emulated/0/nfsu2", "."]);
     let backend = std::env::var("NFSU2_RENDERER").unwrap_or_default();
     let config = DxvkProfileConfig::for_backend(&backend);
     for dir in &candidate_dirs {

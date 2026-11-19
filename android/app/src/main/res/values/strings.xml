@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="allow_access">Allow access to internal storage/nfsu2</string>
+    <string name="allow_access">Allow access to storage</string>
     <string name="applied_on_play">Applied when pressing PLAY.</string>
     <string name="back">Back</string>
     <string name="bc_cpu">CPU emulated</string>
@@ -90,10 +90,9 @@
     <string name="server_roaming">%1$s (%2$d roaming)</string>
     <string name="settings_multiplayer">SETTINGS &amp; MULTIPLAYER</string>
     <string name="stable">Stable</string>
-    <string name="status_allow_access">Allow file access to read internal storage/nfsu2.</string>
+    <string name="status_allow_access">Allow file access to read the game files.</string>
     <string name="status_compatible">Compatible with NFSU2 Revived</string>
-    <string name="status_copy_files">Copy your game files to internal storage/nfsu2.</string>
-    <string name="status_internal_storage">Internal storage/nfsu2</string>
+    <string name="status_copy_files">Copy your game files to %1$s.</string>
     <string name="status_missing">Missing features: %1$s</string>
     <string name="system_default">System default</string>
     <string name="system_default_driver">System default driver</string>
@@ -127,4 +126,8 @@
     <string name="zip_saved">Diagnostic ZIP successfully saved to:\n• %1$s</string>
     <string name="play_anyway">Play anyway</string>
     <string name="diag_title">Diagnostics &amp; Bug Report</string>
+    <string name="opt_storage">Game files location</string>
+    <string name="storage_internal">Internal storage</string>
+    <string name="storage_external">SD card (%1$s)</string>
+    <string name="status_location">Game files: %1$s</string>
 </resources>

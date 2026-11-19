@@ -80,6 +80,27 @@ public final class GameOptions {
 
     private static final String PREFS = "nfsu2_game";
 
+    /** Volume root holding the nfsu2 folder; empty preference means the primary (internal) storage. */
+    static final String GAME_STORAGE = "game_storage";
+    private static volatile java.io.File storageRoot;
+
+    static void loadStorage(Context context) {
+        String path = prefs(context).getString(GAME_STORAGE, "");
+        java.io.File dir = path.isEmpty() ? null : new java.io.File(path);
+        storageRoot = dir != null && dir.isDirectory() ? dir : null;
+    }
+
+    static java.io.File storageRoot() {
+        java.io.File root = storageRoot;
+        return root != null ? root : android.os.Environment.getExternalStorageDirectory();
+    }
+
+    /** Pass null to go back to the internal storage. */
+    static void setStorage(Context context, java.io.File dir) {
+        prefs(context).edit().putString(GAME_STORAGE, dir == null ? "" : dir.getAbsolutePath()).apply();
+        loadStorage(context);
+    }
+
     private GameOptions() {}
 
     static SharedPreferences prefs(Context context) {

@@ -277,7 +277,7 @@ public final class LauncherActivity extends Activity {
         addCheck(missing.length() == 0 ? getString(R.string.game_folders) : getString(R.string.missing_folders, missing), missing.length() == 0, true);
         boolean ready = exe && !languages().isEmpty();
         status.setText(!allowed ? getString(R.string.status_allow_access)
-                : ready ? getString(R.string.status_internal_storage) : getString(R.string.status_copy_files));
+                : ready ? getString(R.string.status_location, root.getAbsolutePath()) : getString(R.string.status_copy_files, new File(GameOptions.storageRoot(), "nfsu2").getAbsolutePath()));
         play.setEnabled(ready);
         play.setAlpha(ready ? 1f : .45f);
         access.setVisibility(allowed ? View.GONE : View.VISIBLE);
@@ -383,7 +383,7 @@ public final class LauncherActivity extends Activity {
                 }
 
                 main.post(() -> status.setText(getString(R.string.extracting_files)));
-                File destDir = Environment.getExternalStorageDirectory();
+                File destDir = GameOptions.storageRoot();
                 extractZip(targetZip, destDir);
 
                 main.post(() -> {
@@ -496,6 +496,7 @@ public final class LauncherActivity extends Activity {
         if (android.os.Process.is64Bit())
             optionsList.addView(optionRow(getString(R.string.opt_vulkan_driver), driver == null ? getString(R.string.system_default) : driver.name, this::chooseDriver));
         optionsList.addView(optionRow(getString(R.string.opt_check_driver), getString(R.string.opt_check_driver_sub), () -> probeDriver(false)));
+        optionsList.addView(optionRow(getString(R.string.opt_storage), storageLabel(GameOptions.storageRoot()), this::chooseStorage));
         optionsList.addView(optionRow(getString(R.string.opt_language), languageLabel(), this::chooseLanguage));
         for (GameOptions.Option option : GameOptions.ALL)
             optionsList.addView(optionRow(option.title(this), option.label(this, GameOptions.get(this, option.key)), () -> chooseOption(option)));
@@ -1102,9 +1103,45 @@ public final class LauncherActivity extends Activity {
     // ---- Storage ---------------------------------------------------------------------------------------
 
     public static File gameRoot() {
-        File f = new File(Environment.getExternalStorageDirectory(), "NFSU2");
+        File storage = GameOptions.storageRoot();
+        File f = new File(storage, "NFSU2");
         if (f.isDirectory()) return f;
-        return new File(Environment.getExternalStorageDirectory(), "nfsu2");
+        return new File(storage, "nfsu2");
+    }
+
+    /** One entry per mounted volume: the primary storage first, then SD cards / USB drives. */
+    private List<File> storageVolumes() {
+        List<File> roots = new ArrayList<>();
+        roots.add(Environment.getExternalStorageDirectory());
+        File[] appDirs = getExternalFilesDirs(null);
+        for (int i = 1; appDirs != null && i < appDirs.length; i++) {
+            if (appDirs[i] == null) continue;
+            String path = appDirs[i].getAbsolutePath();
+            int cut = path.indexOf("/Android/");
+            if (cut > 0 && new File(path.substring(0, cut)).isDirectory()) roots.add(new File(path.substring(0, cut)));
+        }
+        return roots;
+    }
+
+    private String storageLabel(File root) {
+        return root.equals(Environment.getExternalStorageDirectory())
+                ? getString(R.string.storage_internal) : getString(R.string.storage_external, root.getName());
+    }
+
+    private void chooseStorage() {
+        List<File> volumes = storageVolumes();
+        String[] names = new String[volumes.size()];
+        int checked = 0;
+        for (int i = 0; i < names.length; i++) {
+            names[i] = storageLabel(volumes.get(i)) + "\n" + volumes.get(i).getAbsolutePath() + "/nfsu2";
+            if (volumes.get(i).equals(GameOptions.storageRoot())) checked = i;
+        }
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(getString(R.string.opt_storage))
+                .setSingleChoiceItems(names, checked, (dialog, which) -> {
+                    File picked = volumes.get(which);
+                    GameOptions.setStorage(this, picked.equals(Environment.getExternalStorageDirectory()) ? null : picked);
+                    dialog.dismiss(); refresh();
+                }).setNegativeButton(getString(R.string.cancel), null).show();
     }
 
     private boolean allowed() {

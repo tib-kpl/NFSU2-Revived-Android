@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Traductions françaises du lanceur. Mêmes clés que values/strings.xml. -->
-    <string name="allow_access">Autoriser l\'accès au stockage interne/nfsu2</string>
+    <string name="allow_access">Autoriser l\'accès au stockage</string>
     <string name="applied_on_play">Appliqués en appuyant sur JOUER.</string>
     <string name="back">Retour</string>
     <string name="bc_cpu">Émulées par le CPU</string>
@@ -91,10 +91,9 @@
     <string name="server_roaming">%1$s (%2$d en free roam)</string>
     <string name="settings_multiplayer">PARAMÈTRES ET MULTIJOUEUR</string>
     <string name="stable">Stable</string>
-    <string name="status_allow_access">Autorisez l\'accès aux fichiers pour lire le stockage interne/nfsu2.</string>
+    <string name="status_allow_access">Autorisez l\'accès aux fichiers pour lire les fichiers du jeu.</string>
     <string name="status_compatible">Compatible avec NFSU2 Revived</string>
-    <string name="status_copy_files">Copiez les fichiers du jeu dans le stockage interne/nfsu2.</string>
-    <string name="status_internal_storage">Stockage interne/nfsu2</string>
+    <string name="status_copy_files">Copiez les fichiers du jeu dans %1$s.</string>
     <string name="status_missing">Fonctionnalités manquantes : %1$s</string>
     <string name="system_default">Par défaut du système</string>
     <string name="system_default_driver">Pilote par défaut du système</string>
@@ -128,4 +127,8 @@
     <string name="zip_saved">ZIP de diagnostic enregistré avec succès dans :\n• %1$s</string>
     <string name="play_anyway">Jouer quand même</string>
     <string name="diag_title">Diagnostics et rapport de bug</string>
+    <string name="opt_storage">Emplacement des fichiers du jeu</string>
+    <string name="storage_internal">Stockage interne</string>
+    <string name="storage_external">Carte SD (%1$s)</string>
+    <string name="status_location">Fichiers du jeu : %1$s</string>
 </resources>
