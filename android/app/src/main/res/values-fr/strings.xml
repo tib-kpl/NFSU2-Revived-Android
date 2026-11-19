@@ -126,4 +126,6 @@
     <string name="whats_new_failed">Impossible de charger les nouveautés (hors ligne ou pas encore publiées). Vous pouvez les consulter sur GitHub.</string>
     <string name="zip_attach_hint">Vous pouvez joindre ou envoyer ce fichier pour le dépannage.</string>
     <string name="zip_saved">ZIP de diagnostic enregistré avec succès dans :\n• %1$s</string>
+    <string name="play_anyway">Jouer quand même</string>
+    <string name="diag_title">Diagnostics et rapport de bug</string>
 </resources>
