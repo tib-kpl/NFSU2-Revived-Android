@@ -15,6 +15,18 @@ import java.util.regex.Pattern;
  *   0.15.24 > 0.15.24.beta1
  */
 final class ReleaseVersion {
+    private static volatile boolean nativeLoaded = false;
+    static {
+        try {
+            System.loadLibrary("game_core");
+            nativeLoaded = true;
+        } catch (Throwable ignored) {}
+    }
+
+    private static native boolean nativeSameVersion(String remote, String installed);
+    private static native boolean nativeNewer(String remote, String installed);
+    private static native boolean nativeIsUpdateAvailable(String remoteTag, String installedVersion, boolean isBetaChannel, boolean isPrerelease);
+
     private static final Pattern VERSION_PATTERN =
             Pattern.compile("^v?([0-9]+(?:\\.[0-9]+)*)(?:[-._]?(beta|alpha|rc|pre)([0-9]*))?$", Pattern.CASE_INSENSITIVE);
 
@@ -70,6 +82,11 @@ final class ReleaseVersion {
     }
 
     static boolean sameVersion(String remote, String installed) {
+        if (nativeLoaded) {
+            try {
+                return nativeSameVersion(remote, installed);
+            } catch (Throwable ignored) {}
+        }
         if (remote == null || installed == null) return false;
         String sRemote = remote.trim().replaceFirst("(?i)^v", "");
         String sInstalled = installed.trim().replaceFirst("(?i)^v", "");
@@ -93,18 +110,29 @@ final class ReleaseVersion {
     }
 
     static boolean isUpdateAvailable(String remoteTag, String installedVersion, boolean isBetaChannel, boolean isPrerelease) {
+        if (nativeLoaded) {
+            try {
+                return nativeIsUpdateAvailable(remoteTag, installedVersion, isBetaChannel, isPrerelease);
+            } catch (Throwable ignored) {}
+        }
         if (remoteTag == null || remoteTag.trim().isEmpty()) return false;
         if (sameVersion(remoteTag, installedVersion)) return false;
 
-        if (isBetaChannel && isPrerelease) {
-            // Beta channel forces users onto latest pre-release until installed is on the exact same version
-            return true;
+        // If not on beta channel, ignore pre-releases
+        if (!isBetaChannel && isPrerelease) {
+            return false;
         }
 
+        // Only offer an update if the remote version is strictly newer than installed
         return newer(remoteTag, installedVersion);
     }
 
     static boolean newer(String remote, String installed) {
+        if (nativeLoaded) {
+            try {
+                return nativeNewer(remote, installed);
+            } catch (Throwable ignored) {}
+        }
         Parsed a = parse(remote);
         Parsed b = parse(installed);
         if (a == null || b == null) return false;

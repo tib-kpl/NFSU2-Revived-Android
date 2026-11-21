@@ -38,7 +38,7 @@ import java.util.concurrent.Executors;
  * right (Vulkan driver, resolution, frame cap, widescreen, compatibility).
  */
 public final class LauncherActivity extends Activity {
-    private static final int REQUEST_GAME_DIR = 46, REQUEST_DRIVER_ZIP = 45, REQUEST_DRIVER_PROBE = 46;
+    private static final int REQUEST_GAME_DIR = 46, REQUEST_DRIVER_ZIP = 45, REQUEST_DRIVER_PROBE = 46, REQUEST_CHOOSE_FOLDER = 47;
     // NFSU2 Revived Theme (inspired by nfsu2-web: dark asphalt, carbon grey, electric lime).
     private static final int ACCENT = 0xFFC8F088; // NFSU2 menu electric lime
     private static final int BG_PANEL = 0xFF1C1C1C;
@@ -63,9 +63,12 @@ public final class LauncherActivity extends Activity {
         {"Magyar", "Hungarian", "Hungarian"}
     };
 
-    private LinearLayout checksList, optionsList;
+    private LinearLayout optionsList;
     private TextView status;
-    private Button play, access, downloadFiles;
+    private Button play, access, downloadFiles, chooseLocation;
+    private Button btnPresetPerformance, btnPresetBalanced, btnPresetOriginal;
+    public static Context sAppContext = null;
+    public static String sCustomGamePath = null;
     private boolean playAfterProbe, checkingUpdates, resumed;
     /** Auto-launch is considered once per launcher process, so coming back from the game never restarts it. */
     private static boolean autoLaunchHandled;
@@ -133,6 +136,8 @@ public final class LauncherActivity extends Activity {
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        sAppContext = getApplicationContext();
+        sCustomGamePath = GameOptions.prefs(this).getString(GameOptions.CUSTOM_GAME_DIR, null);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             android.view.WindowManager.LayoutParams lp = getWindow().getAttributes();
             lp.layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
@@ -240,9 +245,12 @@ public final class LauncherActivity extends Activity {
         status = label("", 13, 0xDDFFFFFF, false);
         status.setPadding(0, dp(4), 0, dp(6));
         card.addView(status);
-        checksList = new LinearLayout(this);
-        checksList.setOrientation(LinearLayout.VERTICAL);
-        card.addView(checksList);
+
+        chooseLocation = actionButton("Choose Game Folder", false);
+        chooseLocation.setOnClickListener(view -> showChooseLocationDialog());
+        LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(-1, dp(42));
+        chooseParams.topMargin = dp(4);
+        card.addView(chooseLocation, chooseParams);
 
         play = actionButton(getString(R.string.play), true);
         play.setOnClickListener(view -> play());
@@ -253,7 +261,7 @@ public final class LauncherActivity extends Activity {
         access = actionButton(getString(R.string.allow_access), false);
         access.setOnClickListener(view -> requestAccess());
         LinearLayout.LayoutParams accessParams = new LinearLayout.LayoutParams(-1, dp(46));
-        accessParams.topMargin = dp(10);
+        accessParams.topMargin = dp(8);
         left.addView(access, accessParams);
 
         downloadFiles = actionButton(getString(R.string.download_game_data), false);
@@ -283,7 +291,6 @@ public final class LauncherActivity extends Activity {
         boolean allowed = allowed();
         File root = gameRoot();
         if (allowed) ensureScriptsInstalled(root);
-        checksList.removeAllViews();
         boolean exe = allowed && new File(root, "SPEED2.EXE").isFile();
         if (allowed && !exe) {
             ensureGamefilesInstalled(root);
@@ -305,6 +312,7 @@ public final class LauncherActivity extends Activity {
         play.setEnabled(ready);
         play.setAlpha(ready ? 1f : .45f);
         access.setVisibility(allowed ? View.GONE : View.VISIBLE);
+        chooseLocation.setVisibility(allowed && !ready ? View.VISIBLE : View.GONE);
 
         String dlUrl = getGamefilesUrl();
         File localCacheZip = new File(Environment.getExternalStorageDirectory(), "cache/NFSU2_GameFiles.zip");
@@ -314,6 +322,7 @@ public final class LauncherActivity extends Activity {
             downloadFiles.setText(localCacheZip.isFile() ? getString(R.string.install_from_cache) : getString(R.string.download_install));
         }
 
+        updatePresetButtons(GameOptions.prefs(this).getString("active_preset", "original"));
         refreshOptions();
     }
 
@@ -466,13 +475,6 @@ public final class LauncherActivity extends Activity {
             if (oldDinput.exists()) oldDinput.delete();
             File oldAsi = new File(root, "scripts/NFSUnderground2.WidescreenFix.asi");
             if (oldAsi.exists()) oldAsi.delete();
-
-            // Ensure high-performance DXVK Vulkan configuration is deployed
-            File targetConf = new File(root, "dxvk.conf");
-            if (!targetConf.exists() || targetConf.length() == 0) {
-                copyAssetFile(this, "dxvk.conf", targetConf);
-                android.util.Log.i("NFSU2", "Installed optimized Vulkan dxvk.conf to " + targetConf.getAbsolutePath());
-            }
         } catch (Exception ignored) {
         }
 
@@ -632,6 +634,8 @@ public final class LauncherActivity extends Activity {
                     if (GameOptions.WIDESCREEN.equals(option.key) || GameOptions.MINIMAP.equals(option.key)) {
                         GameOptions.applyWidescreenPatchFile(this);
                     }
+                    GameOptions.prefs(this).edit().putString("active_preset", "custom").apply();
+                    updatePresetButtons("custom");
                     dialog.dismiss(); refreshOptions();
                 }).setNegativeButton(getString(R.string.cancel), null).show();
     }
@@ -819,7 +823,6 @@ public final class LauncherActivity extends Activity {
     }
 
     private void chooseDriver() {
-        GpuDrivers.autoDiscoverStorageDrivers(this);
         List<GpuDrivers.Driver> drivers = GpuDrivers.list(this);
         String[] names = new String[drivers.size() + 1];
         names[0] = getString(R.string.system_default_driver);
@@ -830,7 +833,7 @@ public final class LauncherActivity extends Activity {
         }
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(getString(R.string.opt_vulkan_driver))
                 .setSingleChoiceItems(names, selected, (dialog, which) -> {
-                    GpuDrivers.select(this, which == 0 ? "" : drivers.get(which - 1).id);
+                    GpuDrivers.select(this, which == 0 ? GpuDrivers.SYSTEM_DRIVER_ID : drivers.get(which - 1).id);
                     refreshOptions(); dialog.dismiss();
                 })
                 .setPositiveButton(getString(R.string.import_zip), (dialog, which) -> startActivityForResult(
@@ -849,7 +852,9 @@ public final class LauncherActivity extends Activity {
         playAfterProbe = thenPlay;
         play.setEnabled(false);
         try {
-            startActivityForResult(new Intent(this, GpuProbeActivity.class), REQUEST_DRIVER_PROBE);
+            Intent intent = new Intent(this, GpuProbeActivity.class);
+            intent.putExtra("backend", GameOptions.getEffectiveGraphicsBackend(this));
+            startActivityForResult(intent, REQUEST_DRIVER_PROBE);
         } catch (Exception error) {
             play.setEnabled(true);
             playAfterProbe = false;
@@ -935,6 +940,20 @@ public final class LauncherActivity extends Activity {
                     main.post(() -> { refresh(); message(getString(R.string.opt_vulkan_driver), getString(R.string.driver_import_failed, error.getMessage())); });
                 }
             });
+        } else if (requestCode == REQUEST_CHOOSE_FOLDER && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri treeUri = data.getData();
+            try {
+                getContentResolver().takePersistableUriPermission(treeUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            } catch (Throwable ignored) {}
+            String path = getPathFromTreeUri(treeUri);
+            if (path != null) {
+                File dir = new File(path);
+                setCustomGameRoot(dir);
+                refresh();
+            } else {
+                message("Custom Location", "Could not resolve storage path from selected folder. You can enter the path directly.");
+            }
         }
     }
 
@@ -1145,6 +1164,165 @@ public final class LauncherActivity extends Activity {
                 .putStringArrayListExtra("cheats", GameOptions.getActiveCheatCodes(this)));
     }
 
+    // ---- Presets & Custom Location --------------------------------------------------------------------
+
+    private Button presetButton(String title, String presetId) {
+        Button b = new Button(this);
+        b.setText(title);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        b.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC));
+        b.setOnClickListener(v -> applyPreset(presetId));
+        b.setStateListAnimator(null);
+        return b;
+    }
+
+    private void updatePresetButtons(String activePreset) {
+        if (btnPresetPerformance == null || btnPresetBalanced == null || btnPresetOriginal == null) return;
+        setPresetButtonState(btnPresetPerformance, "performance".equalsIgnoreCase(activePreset));
+        setPresetButtonState(btnPresetBalanced, "balanced".equalsIgnoreCase(activePreset));
+        setPresetButtonState(btnPresetOriginal, "original".equalsIgnoreCase(activePreset));
+    }
+
+    private void setPresetButtonState(Button b, boolean active) {
+        b.setTextColor(active ? 0xFF0D1A04 : Color.WHITE);
+        GradientDrawable bg = new GradientDrawable();
+        if (active) {
+            bg.setColor(ACCENT);
+        } else {
+            bg.setColor(BG_FIELD);
+            bg.setStroke(dp(1), STROKE_FIELD);
+        }
+        bg.setCornerRadius(dp(8));
+        b.setBackground(bg);
+    }
+
+    private void applyPreset(String preset) {
+        android.content.SharedPreferences.Editor ed = GameOptions.prefs(this).edit();
+        ed.putString("active_preset", preset);
+        if ("performance".equalsIgnoreCase(preset)) {
+            ed.putString(GameOptions.DRAW_DISTANCE, "performance");
+            ed.putString(GameOptions.RESOLUTION, "50");
+        } else if ("balanced".equalsIgnoreCase(preset)) {
+            ed.putString(GameOptions.DRAW_DISTANCE, "extended");
+            ed.putString(GameOptions.RESOLUTION, "70");
+        } else if ("original".equalsIgnoreCase(preset)) {
+            ed.putString(GameOptions.DRAW_DISTANCE, "original");
+            ed.putString(GameOptions.RESOLUTION, "100");
+        }
+        ed.apply();
+        updatePresetButtons(preset);
+        refreshOptions();
+    }
+
+    private void showChooseLocationDialog() {
+        File current = gameRoot();
+        android.widget.EditText input = new android.widget.EditText(this);
+        input.setSingleLine(true);
+        input.setText(current.getAbsolutePath());
+        input.setSelection(input.getText().length());
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(18);
+        layout.setPadding(pad, dp(10), pad, dp(4));
+
+        TextView hint = label("Enter folder path or tap Browse to select from file manager:", 12, TEXT_MUTED, false);
+        hint.setPadding(0, 0, 0, dp(6));
+        layout.addView(hint);
+        layout.addView(input);
+
+        Button browseBtn = actionButton("Browse Folders…", false);
+        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(-1, dp(40));
+        btnLp.topMargin = dp(8);
+        layout.addView(browseBtn, btnLp);
+
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Select Game Folder")
+                .setView(layout)
+                .setPositiveButton("Save", (d, which) -> {
+                    String p = input.getText().toString().trim();
+                    if (!p.isEmpty()) {
+                        File f = new File(p);
+                        setCustomGameRoot(f);
+                        refresh();
+                    }
+                })
+                .setNeutralButton("Reset Default", (d, which) -> {
+                    GameOptions.prefs(this).edit().remove(GameOptions.CUSTOM_GAME_DIR).apply();
+                    sCustomGamePath = null;
+                    refresh();
+                })
+                .setNegativeButton("Cancel", null)
+                .create();
+
+        browseBtn.setOnClickListener(v -> {
+            dialog.dismiss();
+            launchFolderPicker();
+        });
+
+        dialog.show();
+    }
+
+    private void launchFolderPicker() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivityForResult(intent, REQUEST_CHOOSE_FOLDER);
+        } catch (Exception e) {
+            message("Folder Picker", "Could not launch folder picker: " + e.getMessage());
+        }
+    }
+
+    private void setCustomGameRoot(File dir) {
+        if (dir == null) return;
+        if (!dir.exists()) dir.mkdirs();
+        File actual = dir;
+        if (!new File(actual, "SPEED2.EXE").isFile() && new File(actual, "NFSU2/SPEED2.EXE").isFile()) {
+            actual = new File(actual, "NFSU2");
+        } else if (!new File(actual, "SPEED2.EXE").isFile() && new File(actual, "nfsu2/SPEED2.EXE").isFile()) {
+            actual = new File(actual, "nfsu2");
+        }
+        GameOptions.prefs(this).edit().putString(GameOptions.CUSTOM_GAME_DIR, actual.getAbsolutePath()).apply();
+        sCustomGamePath = actual.getAbsolutePath();
+        android.util.Log.i("NFSU2", "Custom game root set to: " + actual.getAbsolutePath());
+    }
+
+    private static String getPathFromTreeUri(Uri uri) {
+        if (uri == null) return null;
+        try {
+            String docId = null;
+            if (Build.VERSION.SDK_INT >= 21) {
+                docId = android.provider.DocumentsContract.getTreeDocumentId(uri);
+            }
+            if (docId == null) docId = uri.getPath();
+            if (docId != null) {
+                int colon = docId.indexOf(':');
+                String type = colon >= 0 ? docId.substring(0, colon) : docId;
+                String rel = colon >= 0 ? docId.substring(colon + 1) : "";
+                if ("primary".equalsIgnoreCase(type) || type.endsWith("primary")) {
+                    File ext = Environment.getExternalStorageDirectory();
+                    return rel.isEmpty() ? ext.getAbsolutePath() : new File(ext, rel).getAbsolutePath();
+                } else if (type.startsWith("/tree/")) {
+                    String sub = type.substring("/tree/".length());
+                    int subColon = sub.indexOf(':');
+                    if (subColon >= 0 && "primary".equalsIgnoreCase(sub.substring(0, subColon))) {
+                        File ext = Environment.getExternalStorageDirectory();
+                        String r = sub.substring(subColon + 1);
+                        return r.isEmpty() ? ext.getAbsolutePath() : new File(ext, r).getAbsolutePath();
+                    }
+                }
+                File extDir = new File("/storage/" + type + (rel.isEmpty() ? "" : "/" + rel));
+                if (extDir.exists() || extDir.isDirectory()) {
+                    return extDir.getAbsolutePath();
+                }
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("NFSU2", "Failed to resolve tree uri: " + uri, t);
+        }
+        return null;
+    }
+
     // ---- Storage ---------------------------------------------------------------------------------------
 
     public static File gameRoot() {
@@ -1218,13 +1396,6 @@ public final class LauncherActivity extends Activity {
     }
 
     // ---- Widgets ---------------------------------------------------------------------------------------
-
-    private void addCheck(String name, boolean ok, boolean required) {
-        TextView row = label((ok ? "✓  " : required ? "✗  " : "!  ") + name + (ok || required ? "" : " · optional"), 13,
-                ok ? COLOR_OK : required ? COLOR_ERR : COLOR_WARN, false);
-        row.setPadding(0, dp(2), 0, dp(2));
-        checksList.addView(row);
-    }
 
     private View optionRow(String title, String value, Runnable onClick) {
         LinearLayout row = new LinearLayout(this);

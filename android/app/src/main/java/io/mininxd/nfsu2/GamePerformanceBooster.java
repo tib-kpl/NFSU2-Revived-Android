@@ -66,8 +66,8 @@ public final class GamePerformanceBooster {
                 PerformanceCores.bindToPerformanceCores();
             }
 
-            // 2. Native Rust DXVK profile generation and driver environment setup
-            File cacheDir = new File(activity.getCacheDir(), "dxvk-v2");
+            // 2. Native Rust driver environment setup
+            File cacheDir = new File(activity.getCacheDir(), "graphics-cache");
             if (nativeDxvkLoaded) {
                 try {
                     nativeConfigureDxvkAndDriver(cacheDir.getAbsolutePath(), LauncherActivity.gameRoot().getAbsolutePath());
@@ -78,6 +78,7 @@ public final class GamePerformanceBooster {
             }
 
             // 3. Android platform frame scheduler & sustained performance hooks
+            AndroidGameManagerBridge.setGameplayMode(activity, 60);
             configureAndroidGameManager(activity);
             enableSustainedPerformance(activity, window);
 
@@ -124,8 +125,8 @@ public final class GamePerformanceBooster {
             try {
                 PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
                 if (pm != null && pm.isSustainedPerformanceModeSupported()) {
-                    window.setSustainedPerformanceMode(true);
-                    Log.i(TAG, "Sustained performance mode active");
+                    window.setSustainedPerformanceMode(false);
+                    Log.i(TAG, "Sustained performance mode disabled to permit dynamic peak clocks");
                 }
             } catch (Throwable ignored) {}
         }

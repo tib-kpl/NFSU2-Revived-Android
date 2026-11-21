@@ -20,6 +20,16 @@ import java.util.*;
 final class GpuDrivers {
     private static final String TAG = "NFSU2-GpuDrivers";
 
+    private static volatile boolean nativeLoaded = false;
+    static {
+        try {
+            System.loadLibrary("graphics_cache");
+            nativeLoaded = true;
+        } catch (Throwable ignored) {}
+    }
+
+    private static native String nativeScanDrivers(String rootPath);
+
     static final class Driver {
         final String id, name, library;
         final File directory;
@@ -35,11 +45,26 @@ final class GpuDrivers {
     }
 
     static List<Driver> list(Context context) {
-        // Auto-discover any new driver ZIPs dropped in storage before listing
-        autoDiscoverStorageDrivers(context);
-
         List<Driver> result = new ArrayList<>();
-        File[] dirs = root(context).listFiles(File::isDirectory);
+        File rootDir = root(context);
+
+        if (nativeLoaded) {
+            try {
+                String scanned = nativeScanDrivers(rootDir.getAbsolutePath());
+                if (scanned != null && !scanned.isEmpty()) {
+                    for (String line : scanned.split("\n")) {
+                        String[] parts = line.split("\t");
+                        if (parts.length >= 4) {
+                            result.add(new Driver(parts[0], parts[1], new File(parts[2]), parts[3]));
+                        }
+                    }
+                    result.sort(Comparator.comparing(d -> d.name.toLowerCase(Locale.ROOT)));
+                    return result;
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        File[] dirs = rootDir.listFiles(File::isDirectory);
         if (dirs != null) for (File dir : dirs) {
             try {
                 if (dir.getName().startsWith(".")) continue;
@@ -59,94 +84,39 @@ final class GpuDrivers {
         return result;
     }
 
+    public static final String SYSTEM_DRIVER_ID = "system";
+
     static String selectedId(Context context) {
-        return GameOptions.prefs(context).getString("gpu_driver", "");
+        return GameOptions.prefs(context).getString("gpu_driver", SYSTEM_DRIVER_ID);
     }
 
     static Driver selected(Context context) {
         String id = selectedId(context);
-        List<Driver> all = list(context);
-        if (!id.isEmpty()) {
-            for (Driver driver : all) if (driver.id.equals(id)) return driver;
+        if (id.isEmpty() || SYSTEM_DRIVER_ID.equals(id)) {
+            return null;
         }
-
-        // Auto-select PanVK for Mali or Turnip for Adreno if not explicitly chosen
-        if (id.isEmpty() && !all.isEmpty()) {
-            for (Driver driver : all) {
-                if (driver.name.toLowerCase(Locale.ROOT).contains("panvk") ||
-                    driver.library.toLowerCase(Locale.ROOT).contains("panfrost")) {
-                    select(context, driver.id);
-                    Log.i(TAG, "Auto-selected PanVK Vulkan driver for Mali GPU: " + driver.name);
-                    return driver;
-                }
-            }
+        List<Driver> all = list(context);
+        for (Driver driver : all) {
+            if (driver.id.equals(id)) return driver;
         }
         return null;
     }
 
     static void select(Context context, String id) {
-        GameOptions.prefs(context).edit().putString("gpu_driver", id).apply();
+        String val = (id == null || id.isEmpty()) ? SYSTEM_DRIVER_ID : id;
+        GameOptions.prefs(context).edit().putString("gpu_driver", val).apply();
     }
 
-    /**
-     * Auto-discovers driver packages in standard user directories:
-     * /sdcard/Download, /sdcard/cache, /sdcard/nfsu2/drivers.
-     */
-    public static void autoDiscoverStorageDrivers(Context context) {
-        try {
-            File ext = Environment.getExternalStorageDirectory();
-            if (ext == null || !ext.exists()) return;
-
-            List<File> scanDirs = Arrays.asList(
-                new File(ext, "Download"),
-                new File(ext, "cache"),
-                new File(ext, "nfsu2/drivers"),
-                new File(ext, "nfsu2")
-            );
-
-            Set<String> installedNames = new HashSet<>();
-            File[] existing = root(context).listFiles(File::isDirectory);
-            if (existing != null) {
-                for (File d : existing) {
-                    File tagFile = new File(d, "source_archive.txt");
-                    if (tagFile.isFile()) {
-                        try {
-                            installedNames.add(new String(Files.readAllBytes(tagFile.toPath()), StandardCharsets.UTF_8).trim());
-                        } catch (Exception ignored) {}
-                    }
-                }
+    static void clearAll(Context context) {
+        File[] dirs = root(context).listFiles(File::isDirectory);
+        if (dirs != null) {
+            for (File d : dirs) {
+                try {
+                    DriverArchive.delete(d);
+                } catch (Exception ignored) {}
             }
-
-            for (File scanDir : scanDirs) {
-                if (!scanDir.isDirectory()) continue;
-                File[] zips = scanDir.listFiles((dir, name) -> name.toLowerCase(Locale.ROOT).endsWith(".zip"));
-                if (zips == null) continue;
-
-                for (File zipFile : zips) {
-                    String baseName = zipFile.getName();
-                    if (installedNames.contains(baseName)) continue;
-
-                    // Inspect if it is likely a Vulkan driver zip
-                    String lower = baseName.toLowerCase(Locale.ROOT);
-                    if (lower.contains("panvk") || lower.contains("turnip") || lower.contains("mali") ||
-                        lower.contains("vulkan") || lower.contains("mesa") || lower.contains("adreno")) {
-                        try {
-                            Driver d = importFile(context, zipFile);
-                            if (d != null) {
-                                installedNames.add(baseName);
-                                File rec = new File(root(context), d.id + "/source_archive.txt");
-                                Files.write(rec.toPath(), baseName.getBytes(StandardCharsets.UTF_8));
-                                Log.i(TAG, "Auto-imported custom GPU driver from " + zipFile.getAbsolutePath() + ": " + d.name);
-                            }
-                        } catch (Exception e) {
-                            Log.w(TAG, "Failed auto-importing driver from " + zipFile.getName() + ": " + e.getMessage());
-                        }
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            Log.d(TAG, "Auto-discovery error: " + t.getMessage());
         }
+        select(context, SYSTEM_DRIVER_ID);
     }
 
     public static Driver importFile(Context context, File zipFile) throws Exception {

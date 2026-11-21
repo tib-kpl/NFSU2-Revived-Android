@@ -86,9 +86,127 @@ template<class T>T* nativeObject(uint32_t address){
     auto native=dynamic_cast<T*>(found->second.native);return native;
 }
 uint32_t wrapTexture(IDirect3DBaseTexture9* texture){if(!texture)return 0;switch(texture->GetType()){case D3DRTYPE_TEXTURE:return wrap(texture,Kind::Texture);case D3DRTYPE_CUBETEXTURE:return wrap(texture,Kind::Cube);case D3DRTYPE_VOLUMETEXTURE:return wrap(texture,Kind::VolumeTexture);default:throw std::runtime_error("Unknown D3D9 base texture type");}}
+struct FastD3D9Filter {
+    uint32_t rs[256];
+    uint8_t rs_valid[256];
+    uint32_t ss[16][16];
+    uint8_t ss_valid[16][16];
+    uint32_t tss[8][33];
+    uint8_t tss_valid[8][33];
+    uint32_t tex[16];
+    uint64_t tex_epoch[16];
+    uint8_t tex_valid[16];
+    uint32_t decl;
+    uint64_t decl_epoch;
+    uint8_t decl_valid;
+    uint32_t fvf;
+    uint8_t fvf_valid;
+    uint32_t vs;
+    uint64_t vs_epoch;
+    uint8_t vs_valid;
+    uint32_t ps;
+    uint64_t ps_epoch;
+    uint8_t ps_valid;
+    uint64_t epoch;
+
+    void forget() {
+        std::memset(rs_valid, 0, sizeof(rs_valid));
+        std::memset(ss_valid, 0, sizeof(ss_valid));
+        std::memset(tss_valid, 0, sizeof(tss_valid));
+        std::memset(tex_valid, 0, sizeof(tex_valid));
+        decl_valid = 0; fvf_valid = 0; vs_valid = 0; ps_valid = 0;
+    }
+    void notifyRetire() { ++epoch; }
+    void notifyRtChange() {
+        std::memset(tex_valid, 0, sizeof(tex_valid));
+        ++epoch;
+    }
+    inline bool filter(uint32_t method, const uint32_t* args, uint32_t* count) {
+        switch(method) {
+        case 57: { // SetRenderState(State, Value)
+            *count = 3;
+            uint32_t st = args[1];
+            if (st < 256) {
+                uint32_t val = args[2];
+                if (rs_valid[st] && rs[st] == val) return true;
+                rs[st] = val;
+                rs_valid[st] = 1;
+            }
+            return false;
+        }
+        case 65: { // SetTexture(Stage, pTexture)
+            *count = 3;
+            uint32_t st = args[1];
+            if (st < 16) {
+                uint32_t tex_h = args[2];
+                if (tex_valid[st] && tex[st] == tex_h && tex_epoch[st] == epoch) return true;
+                tex[st] = tex_h;
+                tex_epoch[st] = epoch;
+                tex_valid[st] = 1;
+            }
+            return false;
+        }
+        case 67: { // SetTextureStageState(Stage, Type, Value)
+            *count = 4;
+            uint32_t st = args[1], type = args[2];
+            if (st < 8 && type < 33) {
+                uint32_t val = args[3];
+                if (tss_valid[st][type] && tss[st][type] == val) return true;
+                tss[st][type] = val;
+                tss_valid[st][type] = 1;
+            }
+            return false;
+        }
+        case 69: { // SetSamplerState(Sampler, Type, Value)
+            *count = 4;
+            uint32_t smp = args[1], type = args[2];
+            if (smp < 16 && type < 16) {
+                uint32_t val = args[3];
+                if ((type == 1 || type == 2) && val == 1 && smp < 4) val = 3; // Clamp
+                if (ss_valid[smp][type] && ss[smp][type] == val) return true;
+                ss[smp][type] = val;
+                ss_valid[smp][type] = 1;
+            }
+            return false;
+        }
+        case 87: { // SetVertexDeclaration(pDecl)
+            *count = 2;
+            uint32_t decl_h = args[1];
+            if (decl_valid && decl == decl_h && decl_epoch == epoch) return true;
+            decl = decl_h; decl_epoch = epoch; decl_valid = 1; fvf_valid = 0;
+            return false;
+        }
+        case 89: { // SetFVF(FVF)
+            *count = 2;
+            uint32_t fvf_val = args[1];
+            if (fvf_valid && fvf == fvf_val) return true;
+            fvf = fvf_val; fvf_valid = 1; decl_valid = 0;
+            return false;
+        }
+        case 92: { // SetVertexShader(pShader)
+            *count = 2;
+            uint32_t sh = args[1];
+            if (vs_valid && vs == sh && vs_epoch == epoch) return true;
+            vs = sh; vs_epoch = epoch; vs_valid = 1;
+            return false;
+        }
+        case 107: { // SetPixelShader(pShader)
+            *count = 2;
+            uint32_t sh = args[1];
+            if (ps_valid && ps == sh && ps_epoch == epoch) return true;
+            ps = sh; ps_epoch = epoch; ps_valid = 1;
+            return false;
+        }
+        default: return false;
+        }
+    }
+};
+static FastD3D9Filter s_fast_d3d9_filter{};
+
 void retireGuestObject(uint32_t address){
     cachedObjectAddress=0;cachedObject=nullptr;
     auto found=objects.find(address);if(found==objects.end())return;
+    s_fast_d3d9_filter.notifyRetire();
     static auto s_filter_retire = reinterpret_cast<void(*)()>(dlsym(RTLD_DEFAULT,"nfs_d3d9_filter_notify_retired"));
     if(s_filter_retire) s_filter_retire();
     uint32_t table;std::memcpy(&table,pointer(address),4);
@@ -150,6 +268,7 @@ D3DFORMAT nativeTextureFormat(IDirect3DDevice9* device,D3DFORMAT format,DWORD us
 }
 void describeOriginal(uint32_t address,D3DSURFACE_DESC* desc){auto view=compressionView(address);if(view.texture&&desc)desc->Format=static_cast<D3DFORMAT>(view.texture->format);}
 }
+void* resolveGraphicsCacheSymbol(const char* name);
 void setD3D9Compatibility(bool cpuTextures,unsigned backBuffers){
     forceCpuTextures=cpuTextures;configuredBackBuffers=backBuffers<1?1u:backBuffers>3?3u:backBuffers;
 }
@@ -157,6 +276,21 @@ void configureD3D9Bridge(void* base,uint32_t (*allocator)(uint32_t),void (*deall
     guestBase=base;allocateGuest=allocator;freeGuest=deallocator;
     static auto s_tuner_env = reinterpret_cast<int(*)()>(dlsym(RTLD_DEFAULT,"nfs_dxvk_tuner_apply_environment"));
     if(s_tuner_env) s_tuner_env();
+    const char* rend = std::getenv("NFSU2_RENDERER");
+    bool isGl = rend && (std::strcmp(rend, "opengl") == 0 || std::strcmp(rend, "opengl_es") == 0);
+    if(isGl) {
+        static auto s_gles_init = reinterpret_cast<int(*)()>(resolveGraphicsCacheSymbol("nfs_native_gles_init"));
+        if(s_gles_init) {
+            int ret = s_gles_init();
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO, "NFSU2-GLES", "Native Pure Rust GLES initialized (result=%d)", ret);
+        }
+    } else {
+        static auto s_vk_init = reinterpret_cast<int(*)()>(resolveGraphicsCacheSymbol("nfs_native_vk_init"));
+        if(s_vk_init) {
+            int ret = s_vk_init();
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO, "NFSU2-VK", "Native Pure Rust Vulkan initialized (result=%d)", ret);
+        }
+    }
 #ifdef __ANDROID__
     // android_main provides a writable private cache before creating DXVK.
     // Other bring-up callers can still run without a writable working directory.
@@ -184,10 +318,32 @@ void setD3D9HostWindow(ANativeWindow* window){
     hostWindow=window;
 #ifdef __ANDROID__
     if(window){
+        typedef int32_t (*PFN_ANativeWindow_setFrameRateWithChangeFrameRateStrategy)(ANativeWindow*, float, int8_t, int8_t);
         typedef int32_t (*PFN_ANativeWindow_setFrameRate)(ANativeWindow*, float, int8_t);
-        static auto pfnSetFrameRate = reinterpret_cast<PFN_ANativeWindow_setFrameRate>(dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"));
-        if(pfnSetFrameRate){
+        static auto pfnStrategy = reinterpret_cast<PFN_ANativeWindow_setFrameRateWithChangeFrameRateStrategy>(
+            dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRateWithChangeFrameRateStrategy"));
+        static auto pfnSetFrameRate = reinterpret_cast<PFN_ANativeWindow_setFrameRate>(
+            dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"));
+
+        if(pfnStrategy){
+            // ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT = 0
+            // ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS = 1
+            pfnStrategy(window, 60.0f, 0, 1);
+        } else if(pfnSetFrameRate){
             pfnSetFrameRate(window, 60.0f, 0);
+        }
+    }
+    const char* rend = std::getenv("NFSU2_RENDERER");
+    bool isGl = rend && (std::strcmp(rend, "opengl") == 0 || std::strcmp(rend, "opengl_es") == 0);
+    if(isGl) {
+        static auto s_native_window = reinterpret_cast<int(*)(void*)>(resolveGraphicsCacheSymbol("nfs_native_gles_set_window"));
+        if(s_native_window) {
+            s_native_window(window);
+        }
+    } else {
+        static auto s_native_vk_window = reinterpret_cast<int(*)(void*)>(resolveGraphicsCacheSymbol("nfs_native_vk_set_window"));
+        if(s_native_vk_window) {
+            s_native_vk_window(window);
         }
     }
 #endif
@@ -197,7 +353,7 @@ bool d3d9RequestsSurface(){return surfaceRequested;}
 void acknowledgeD3D9Surface(bool available){surfaceAvailable=available;}
 uint32_t createGuestD3D9(uint32_t sdk){
     auto native=Direct3DCreate9(sdk);
-    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","DXVK native Direct3DCreate9 sdk=%u",sdk);
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Native Direct3DCreate9 sdk=%u",sdk);
     return wrap(native,Kind::D3D9);
 }
 // Logs each vertex declaration type the first time the game uses it, flagging the
@@ -332,12 +488,20 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
         if(s_cam_restore) s_cam_restore(guestBase);
         static void(*s_telemetry_present)(uint64_t) = nullptr;
         if(!s_telemetry_present) s_telemetry_present = reinterpret_cast<void(*)(uint64_t)>(resolveGraphicsCacheSymbol("nfs_telemetry_record_present"));
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
         if(s_telemetry_present) {
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
             s_telemetry_present(now_ns);
         }
+        static uint64_t s_last_present_ns = 0;
+        if (s_last_present_ns > 0 && now_ns > s_last_present_ns) {
+            uint64_t frame_dur_ns = now_ns - s_last_present_ns;
+            static void(*s_metrics_record)(uint64_t) = nullptr;
+            if(!s_metrics_record) s_metrics_record = reinterpret_cast<void(*)(uint64_t)>(resolveGraphicsCacheSymbol("nfs_metrics_record_frame"));
+            if(s_metrics_record) s_metrics_record(frame_dur_ns);
+        }
+        s_last_present_ns = now_ns;
         static int(*s_contrast_post)(void*) = nullptr;
         if(!s_contrast_post) s_contrast_post = reinterpret_cast<int(*)(void*)>(resolveGraphicsCacheSymbol("nfs_contrast_regulator_post_frame"));
         if(s_contrast_post) s_contrast_post(guestBase);
@@ -349,6 +513,14 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
 
         auto source=static_cast<const RECT*>(pointer(args[1])),destination=static_cast<const RECT*>(pointer(args[2]));
         auto dirty=static_cast<const RGNDATA*>(pointer(args[4]));
+        static auto s_native_vk_present = reinterpret_cast<int(*)()>(resolveGraphicsCacheSymbol("nfs_native_vk_present"));
+        if(s_native_vk_present && s_native_vk_present() == 0) {
+            return D3D_OK;
+        }
+        static auto s_native_present = reinterpret_cast<int(*)()>(resolveGraphicsCacheSymbol("nfs_native_gles_present"));
+        if(s_native_present && s_native_present() == 0) {
+            return D3D_OK;
+        }
         return kind==2?static_cast<IDirect3DDevice9*>(object)->Present(source,destination,window,dirty):
             static_cast<IDirect3DSwapChain9*>(object)->Present(source,destination,window,dirty,args[5]);
     }
@@ -442,6 +614,9 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
         }
     }
     if(kind==2){
+        if(s_fast_d3d9_filter.filter(method, args, argumentCount)){
+            return D3D_OK;
+        }
         static auto s_filter_state = []() -> int(*)(uint32_t,const uint32_t*,uint32_t*) {
             void* h = getGraphicsCacheHandle();
             auto fn = h ? reinterpret_cast<int(*)(uint32_t,const uint32_t*,uint32_t*)>(dlsym(h,"nfs_d3d9_filter_state")) : nullptr;
@@ -457,19 +632,13 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
         case 9:{*argumentCount=2;D3DDEVICE_CREATION_PARAMETERS p{};HRESULT status=device->GetCreationParameters(&p);if(SUCCEEDED(status)){write(args[1],p.AdapterOrdinal);write(args[1]+4,p.DeviceType);write(args[1]+8,0xf0000301);write(args[1]+12,p.BehaviorFlags);}return status;}
         case 13:{*argumentCount=3;auto p=presentation(args[1]);IDirect3DSwapChain9* result=nullptr;HRESULT status=device->CreateAdditionalSwapChain(&p,&result);write(args[2],SUCCEEDED(status)?wrap(result,Kind::SwapChain):0);return status;}
         case 16:{*argumentCount=2;auto p=presentation(args[1]);HRESULT status=D3DERR_DEVICELOST;
+            s_fast_d3d9_filter.forget();
             static auto s_filter_forget = reinterpret_cast<void(*)()>(dlsym(RTLD_DEFAULT,"nfs_d3d9_filter_forget_shadow"));
             if(s_filter_forget) s_filter_forget();
             static auto s_rs_reset = reinterpret_cast<void(*)()>(dlsym(RTLD_DEFAULT,"nfs_rain_splatter_reset"));
             if(s_rs_reset) s_rs_reset();
-            // DXVK throws (DxvkError) when it cannot rebuild the swap chain; Windows
-            // would report a lost device, which the game retries (Mali G615 report).
-            // The old Android window can stay busy for a moment: retry once before giving up.
-            for(int attempt=0;attempt<2;++attempt){
-                try{status=device->Reset(&p);break;}catch(...){
-                    NFS_RUNTIME_LOG(ANDROID_LOG_ERROR,"NFSU2","D3D9 Reset raised a DXVK error (attempt %d)",attempt+1);status=D3DERR_DEVICELOST;
-                    if(!attempt)std::this_thread::sleep_for(std::chrono::milliseconds(100));}
-            }
-            deviceResetPending=status==D3DERR_DEVICELOST;
+            status = device->Reset(&p);
+            deviceResetPending = (status == D3DERR_DEVICELOST);
             NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","D3D9 Reset backbuffer %ux%u result=%08x",p.BackBufferWidth,p.BackBufferHeight,uint32_t(status));return status;}
         case 23:{*argumentCount=9;if(args[8])throw std::runtime_error("Shared texture handle pending");if(!args[7])return D3DERR_INVALIDCALL;
             auto original=static_cast<D3DFORMAT>(args[5]),format=nativeTextureFormat(device,original,args[4],D3DRTYPE_TEXTURE);IDirect3DTexture9* texture=nullptr;

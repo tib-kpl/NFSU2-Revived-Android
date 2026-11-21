@@ -35,28 +35,29 @@ pub fn tune_current_thread(role: ThreadRole, name: Option<&str>) {
         }
     }
 
+    let all_cores_mask = if cluster.total_cores >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << cluster.total_cores) - 1
+    };
+
     let (mask, nice) = match role {
         ThreadRole::RenderMain => {
-            // Main rendering thread: bind to prime + mid performance cluster, urgent nice (-16)
-            (cluster.perf_cores_mask, -16)
+            // Main rendering thread: pin to Big/Performance cores with maximum interactive priority
+            let m = if cluster.perf_cores_mask != 0 {
+                cluster.perf_cores_mask
+            } else {
+                all_cores_mask
+            };
+            (m, -20)
         }
         ThreadRole::GuestAudio => {
-            // Audio thread: isolate onto dedicated mid performance cores to avoid prime core contention
-            let target = if cluster.mid_cores_mask != 0 && cluster.mid_cores_mask != cluster.prime_cores_mask {
-                cluster.mid_cores_mask
-            } else {
-                cluster.perf_cores_mask
-            };
-            (target, -12)
+            // Audio thread: all cores available, high priority nice (-16)
+            (all_cores_mask, -16)
         }
         ThreadRole::BackgroundWorker => {
-            // Background workers / asset loading: allow little + mid cores, normal nice (0)
-            let target = if cluster.little_cores_mask != 0 {
-                cluster.little_cores_mask | cluster.mid_cores_mask
-            } else {
-                (1u64 << cluster.total_cores) - 1
-            };
-            (target, 0)
+            // Background workers / JIT / asset loading: all cores available, priority nice (-10)
+            (all_cores_mask, -10)
         }
     };
 
@@ -75,6 +76,16 @@ pub fn tune_current_thread(role: ThreadRole, name: Option<&str>) {
 // ---------------------------------------------------------------------------
 // C ABI Compatibility Exports
 // ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn nfs_perf_init_topology() {
+    let _ = CpuCluster::detect();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nfs_perf_tune_thread(role: c_int, name: *const c_char) {
+    nfs_perf_tune_thread_role(role, name);
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn nfs_perf_tune_thread_role(role: c_int, name: *const c_char) {

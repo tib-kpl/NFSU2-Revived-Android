@@ -6,9 +6,27 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sched.h>
+#include <dlfcn.h>
+#include <sys/resource.h>
 #include <android/log.h>
 
 int nfs_bind_to_perf_cores(void) {
+    typedef int (*FnBindPerf)(void);
+    static FnBindPerf s_rust_bind = NULL;
+    static int s_checked = 0;
+    if (!s_checked) {
+        s_checked = 1;
+        void* h = dlopen("libperf_cores.so", RTLD_NOLOAD);
+        if (!h) h = dlopen("libperf_cores.so", RTLD_NOW);
+        if (h) s_rust_bind = (FnBindPerf)dlsym(h, "nfs_perf_cores_bind");
+        if (!s_rust_bind) s_rust_bind = (FnBindPerf)dlsym(RTLD_DEFAULT, "nfs_perf_cores_bind");
+    }
+    if (s_rust_bind) {
+        int r = s_rust_bind();
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-PerfCores", "Bound process to tri-cluster performance cores via Rust engine (ret=%d)", r);
+        return r;
+    }
+
     long highest_freq = 0;
     long freqs[64] = {0};
     int total_cpus = sysconf(_SC_NPROCESSORS_CONF);
@@ -48,8 +66,11 @@ int nfs_bind_to_perf_cores(void) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     int count = 0;
-    long threshold = (long)(highest_freq * 0.80);
 
+    // Filter performance cores (Prime + Mid clusters)
+    // On big.LITTLE / tri-cluster architectures, cores with >= 70% of max frequency or capacity
+    // represent the mid/big and prime cores, while little efficiency cores are excluded.
+    long threshold = (long)(highest_freq * 0.70);
     if (highest_freq > 0) {
         for (int i = 0; i < total_cpus; i++) {
             if (freqs[i] >= threshold) {
@@ -59,18 +80,23 @@ int nfs_bind_to_perf_cores(void) {
         }
     }
 
+    // Safety fallback: if thresholding produced 0 cores or all cores, use all cores
     if (count == 0) {
-        int start = total_cpus > 1 ? total_cpus / 2 : 0;
-        for (int i = start; i < total_cpus; i++) {
+        for (int i = 0; i < total_cpus; i++) {
             CPU_SET(i, &cpuset);
             count++;
         }
     }
 
+    // Elevate priority of the process & calling thread to highest real-time interactive priority (-20)
+    // so EAS / WALT governors prioritize scheduling and rapidly ramp up CPU clocks.
+    setpriority(PRIO_PROCESS, getpid(), -20);
+    setpriority(PRIO_PROCESS, 0, -20);
+
     sched_setaffinity(getpid(), sizeof(cpu_set_t), &cpuset);
     int ret = sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
 
-    // Apply performance core affinity to all worker threads of the process
+    // Apply performance core affinity and elevated priority to all worker threads of the process
     DIR *d = opendir("/proc/self/task");
     if (d) {
         struct dirent *de;
@@ -78,10 +104,11 @@ int nfs_bind_to_perf_cores(void) {
             int tid = atoi(de->d_name);
             if (tid > 0) {
                 sched_setaffinity(tid, sizeof(cpu_set_t), &cpuset);
+                setpriority(PRIO_PROCESS, tid, -20);
             }
         }
         closedir(d);
     }
-    __android_log_print(ANDROID_LOG_INFO, "NFSU2-PerfCores", "Bound process and threads to %d performance cores (ret=%d)", count, ret);
+    __android_log_print(ANDROID_LOG_INFO, "NFSU2-PerfCores", "Bound process and threads to %d performance cores (highest_freq=%ld, ret=%d)", count, highest_freq, ret);
     return ret;
 }

@@ -43,6 +43,16 @@ public final class DiagnosticOverlay {
         } catch (Throwable t) {
             android.util.Log.w("NFSU2", "DiagnosticOverlay: libgraphics_cache load: " + t.getMessage());
         }
+        try {
+            System.loadLibrary("game_core");
+        } catch (Throwable t) {
+            android.util.Log.w("NFSU2", "DiagnosticOverlay: libgame_core load: " + t.getMessage());
+        }
+        try {
+            System.loadLibrary("perf_cores");
+        } catch (Throwable t) {
+            android.util.Log.w("NFSU2", "DiagnosticOverlay: libperf_cores load: " + t.getMessage());
+        }
     }
 
     private final Activity activity;
@@ -69,8 +79,50 @@ public final class DiagnosticOverlay {
 
     // Native pure Rust telemetry buffer [fps, frame_time_ms, cpu_percent, gpu_busy]
     private final float[] telemetryBuffer = new float[4];
+    private final float[] frameMetricsBuffer = new float[6];
     public static native boolean nativeGetTelemetry(float[] outArray);
     public static native void nativeRecordPresent(long frameDurationNs);
+    public static native void nativeRecordFrameDuration(long durationNs);
+    public static native boolean nativeGetFrameMetrics(float[] outArray);
+    public static native String nativeFormatOverlayText(
+            boolean isFull,
+            float fps,
+            float p1Low,
+            float frameTimeMs,
+            float cpuPercent,
+            float gpuPercent,
+            long usedMb,
+            long totalMb,
+            boolean roamEnabled,
+            boolean adhocConnected,
+            boolean isRacing,
+            int onRaceCount,
+            String racersCsv,
+            int displayOnline,
+            String serverHost,
+            String roomName,
+            int roomRoam,
+            int totalRoam,
+            int totalServer,
+            String connStatus,
+            String gpuDriver,
+            String cpuModel,
+            String systemPlatform
+    );
+
+    private static void safeRecordFrameDuration(long durationNs) {
+        try {
+            nativeRecordFrameDuration(durationNs);
+        } catch (Throwable ignored) {}
+    }
+
+    private static boolean safeGetFrameMetrics(float[] outArray) {
+        try {
+            return nativeGetFrameMetrics(outArray);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
 
     // CPU measurement state
     private long prevTotal = 0;
@@ -168,6 +220,7 @@ public final class DiagnosticOverlay {
                     long totalNs = frameMetrics.getMetric(FrameMetrics.TOTAL_DURATION);
                     if (totalNs > 0) {
                         lastFrameDurationMs = totalNs / 1_000_000.0f;
+                        safeRecordFrameDuration(totalNs);
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         try {
@@ -309,6 +362,7 @@ public final class DiagnosticOverlay {
                                     liveGameFps = measuredFps;
                                     lastFrameDurationMs = 1000.0f / measuredFps;
                                     calculatedFromNative = true;
+                                    safeRecordFrameDuration((long)(1_000_000_000L / Math.max(1.0f, measuredFps)));
                                 }
                             }
                             lastNativeFrameCount = currentNativeFrames;
@@ -348,6 +402,7 @@ public final class DiagnosticOverlay {
                     }
                     if (telemetryBuffer[1] > 0.0f) {
                         lastFrameDurationMs = telemetryBuffer[1];
+                        safeRecordFrameDuration((long)(telemetryBuffer[1] * 1_000_000.0f));
                     }
                 }
             } catch (Throwable ignored) {}
@@ -364,14 +419,25 @@ public final class DiagnosticOverlay {
 
     private void updateStats() {
         float fps = liveGameFps;
+        float frameTimeMs = (lastFrameDurationMs > 0.0f) ? lastFrameDurationMs : ((fps > 0.0f) ? (1000.0f / fps) : 0.0f);
+        float p1Low = 0.0f;
+        if (safeGetFrameMetrics(frameMetricsBuffer)) {
+            if (frameMetricsBuffer[1] > 0.5f) {
+                fps = frameMetricsBuffer[1];
+                frameTimeMs = frameMetricsBuffer[4];
+                p1Low = frameMetricsBuffer[2];
+            }
+        }
         if (fps <= 0.0f) {
             try {
                 fps = Integer.parseInt(GameOptions.get(activity, GameOptions.FPS));
             } catch (Exception ignored) {
                 fps = 60.0f;
             }
+            if (frameTimeMs <= 0.0f) {
+                frameTimeMs = 1000.0f / fps;
+            }
         }
-        float frameTimeMs = (lastFrameDurationMs > 0.0f) ? lastFrameDurationMs : ((fps > 0.0f) ? (1000.0f / fps) : 0.0f);
         String fpsStr = (fps >= 100.0f) ? String.format(Locale.US, "%.0f", fps) : String.format(Locale.US, "%.1f", fps);
 
         float cpu = (telemetryBuffer[2] > 0.0f) ? telemetryBuffer[2] : sampleCpuUsage();
@@ -429,9 +495,53 @@ public final class DiagnosticOverlay {
             displayOnline = onlineCount;
         }
 
+        StringBuilder racersSb = new StringBuilder();
+        for (int i = 0; i < racers.size(); i++) {
+            if (i > 0) racersSb.append(", ");
+            racersSb.append(racers.get(i));
+        }
+        String racersCsv = racersSb.toString();
+        float gpu = getGpuUsagePercent();
+
+        try {
+            String nativeText = nativeFormatOverlayText(
+                    isFull(),
+                    fps,
+                    p1Low,
+                    frameTimeMs,
+                    cpu,
+                    gpu,
+                    usedMb,
+                    totalMb,
+                    GameOptions.isRoamEnabled(activity),
+                    adhocConnected,
+                    isRacing,
+                    onRaceCount,
+                    racersCsv,
+                    displayOnline,
+                    roamClient.getServerHost(),
+                    room != null ? room : "",
+                    roomRoam,
+                    totalRoam,
+                    totalServer,
+                    roamClient.getConnectionStatus(),
+                    gpuDriverName != null ? gpuDriverName : "",
+                    cpuModel != null ? cpuModel : "",
+                    systemPlatform != null ? systemPlatform : ""
+            );
+            if (nativeText != null && !nativeText.isEmpty()) {
+                textView.setText(nativeText);
+                return;
+            }
+        } catch (Throwable ignored) {}
+
         if (isFull()) {
             StringBuilder sb = new StringBuilder();
-            sb.append("fps: ").append(fpsStr).append(" (").append(String.format(Locale.US, "%.1f ms", frameTimeMs)).append(")\n");
+            sb.append("fps: ").append(fpsStr);
+            if (p1Low > 0.0f) {
+                sb.append(" (1% low: ").append(Math.round(p1Low)).append(")");
+            }
+            sb.append(" (").append(String.format(Locale.US, "%.1f ms", frameTimeMs)).append(")\n");
 
             if (GameOptions.isRoamEnabled(activity)) {
                 if (adhocConnected) {
@@ -465,7 +575,6 @@ public final class DiagnosticOverlay {
             }
 
             sb.append(String.format(Locale.US, "cpu_usage: %.1f%%\n", cpu));
-            float gpu = getGpuUsagePercent();
             sb.append(String.format(Locale.US, "gpu_usage: %.0f%%\n", gpu));
             // Display system info directly without "system:" label prefix
             sb.append(gpuDriverName).append(", ").append(cpuModel).append(", ").append(systemPlatform).append('\n');
@@ -473,7 +582,6 @@ public final class DiagnosticOverlay {
             textView.setText(sb.toString());
         } else {
             // Compact Mode: sleek right-aligned HUD
-            float gpu = getGpuUsagePercent();
             if (adhocConnected) {
                 if (isRacing) {
                     String text = String.format(Locale.US,

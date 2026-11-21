@@ -226,7 +226,9 @@ pub unsafe extern "C" fn nfs_rust_apply_engine_pacing(mem_base: *mut u8, real_el
             let corrected = pacing_filter_dt(real_elapsed, effective_dt);
             write_f32(mem_base, G_SIM_WDT_ADDR, corrected);
             write_f32(mem_base, G_SIM_REALDT_ADDR, corrected);
-            write_u32(mem_base, G_SIM_STEPS_ADDR, (corrected * 1800.0) as u32);
+            // Cap simulation physics steps to 35 max to prevent CPU physics death spiral during hiccups
+            let steps = ((corrected * 1800.0) as u32).min(35);
+            write_u32(mem_base, G_SIM_STEPS_ADDR, steps);
             PACED_FRAMES.fetch_add(1, Ordering::Relaxed);
         }
     }

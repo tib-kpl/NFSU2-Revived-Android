@@ -23,6 +23,7 @@ import android.graphics.Typeface;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
+import android.os.SystemClock;
 import java.util.ArrayList;
 import java.util.HashMap;
 
@@ -65,6 +66,233 @@ final class RacingControlsView extends View {
     private int twoFingerId1 = -1;
     private int twoFingerId2 = -1;
     private float twoFingerLastMidX, twoFingerLastMidY;
+
+    private static boolean sGameCoreLoaded = false;
+    static {
+        try {
+            System.loadLibrary("game_core");
+            sGameCoreLoaded = true;
+        } catch (Throwable ignored) {
+            sGameCoreLoaded = false;
+        }
+    }
+
+    private static final int GESTURE_NONE = 0;
+    private static final int GESTURE_CLICK = 1;
+    private static final int GESTURE_DRAG_START = 2;
+    private static final int GESTURE_DRAG_MOVE = 3;
+    private static final int GESTURE_DRAG_END = 4;
+
+    private static native int nativeMenuGestureProcess(int action, int pointerId, float x, float y, long timeMs, float width, float height);
+    private static native int nativeMenuGestureCheckTimeout(long timeMs);
+    private static native void nativeMenuGestureReset();
+    private static native float nativeMenuGestureGetX();
+    private static native float nativeMenuGestureGetY();
+    private static native float nativeMenuGestureGetDx();
+    private static native float nativeMenuGestureGetDy();
+
+    private static void safeMenuGestureReset() {
+        if (!sGameCoreLoaded) return;
+        try {
+            nativeMenuGestureReset();
+        } catch (Throwable ignored) {}
+    }
+
+    private static int safeMenuGestureProcess(int action, int pointerId, float x, float y, long timeMs, float width, float height) {
+        if (!sGameCoreLoaded) return GESTURE_NONE;
+        try {
+            return nativeMenuGestureProcess(action, pointerId, x, y, timeMs, width, height);
+        } catch (Throwable ignored) {
+            return GESTURE_NONE;
+        }
+    }
+
+    private static int safeMenuGestureCheckTimeout(long timeMs) {
+        if (!sGameCoreLoaded) return GESTURE_NONE;
+        try {
+            return nativeMenuGestureCheckTimeout(timeMs);
+        } catch (Throwable ignored) {
+            return GESTURE_NONE;
+        }
+    }
+
+    private static float safeMenuGestureGetX() {
+        if (!sGameCoreLoaded) return 0f;
+        try {
+            return nativeMenuGestureGetX();
+        } catch (Throwable ignored) {
+            return 0f;
+        }
+    }
+
+    private static float safeMenuGestureGetY() {
+        if (!sGameCoreLoaded) return 0f;
+        try {
+            return nativeMenuGestureGetY();
+        } catch (Throwable ignored) {
+            return 0f;
+        }
+    }
+
+    private static float safeMenuGestureGetDx() {
+        if (!sGameCoreLoaded) return 0f;
+        try {
+            return nativeMenuGestureGetDx();
+        } catch (Throwable ignored) {
+            return 0f;
+        }
+    }
+
+    private static float safeMenuGestureGetDy() {
+        if (!sGameCoreLoaded) return 0f;
+        try {
+            return nativeMenuGestureGetDy();
+        } catch (Throwable ignored) {
+            return 0f;
+        }
+    }
+
+    private static native void nativeGarageZoom(float delta);
+    private static native void nativeGarageResetView();
+    private static native float nativeCalculateSCurve(float rawX, float centerX, float halfWidth, float scale, float deadzone);
+    private static native void nativeAutoDimTouch(long nowMs);
+    private static native void nativeAutoDimSetGamepad(boolean active);
+    private static native float nativeAutoDimUpdate(long nowMs, long idleTimeoutMs, float minOpacity);
+    private static native void nativeAutoDimReset();
+
+    private static float safeCalculateSCurve(float rawX, float centerX, float halfWidth, float scale, float deadzone) {
+        if (!sGameCoreLoaded) {
+            return PerformanceCores.calculateSteeringProgressive(rawX, centerX, halfWidth, scale, deadzone);
+        }
+        try {
+            return nativeCalculateSCurve(rawX, centerX, halfWidth, scale, deadzone);
+        } catch (Throwable ignored) {
+            return PerformanceCores.calculateSteeringProgressive(rawX, centerX, halfWidth, scale, deadzone);
+        }
+    }
+
+    private static void safeAutoDimTouch(long nowMs) {
+        if (!sGameCoreLoaded) return;
+        try {
+            nativeAutoDimTouch(nowMs);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void safeAutoDimSetGamepad(boolean active) {
+        if (!sGameCoreLoaded) return;
+        try {
+            nativeAutoDimSetGamepad(active);
+        } catch (Throwable ignored) {}
+    }
+
+    private static float safeAutoDimUpdate(long nowMs, long idleTimeoutMs, float minOpacity) {
+        if (!sGameCoreLoaded) return 1.0f;
+        try {
+            return nativeAutoDimUpdate(nowMs, idleTimeoutMs, minOpacity);
+        } catch (Throwable ignored) {
+            return 1.0f;
+        }
+    }
+
+    private static void safeAutoDimReset() {
+        if (!sGameCoreLoaded) return;
+        try {
+            nativeAutoDimReset();
+        } catch (Throwable ignored) {}
+    }
+
+    // Auto-Dim Controls State
+    private float currentDimFactor = 1.0f;
+    private boolean autoDimEnabled = true;
+
+    public void notifyGamepadActive(boolean active) {
+        safeAutoDimSetGamepad(active);
+        if (active && currentDimFactor > 0.20f) {
+            currentDimFactor = Math.max(0.15f, currentDimFactor - 0.15f);
+            invalidate();
+        }
+    }
+
+    private static void safeGarageZoom(float delta) {
+        if (!sGameCoreLoaded) return;
+        try {
+            nativeGarageZoom(delta);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void safeGarageResetView() {
+        if (!sGameCoreLoaded) return;
+        try {
+            nativeGarageResetView();
+        } catch (Throwable ignored) {}
+    }
+
+    // Showroom Gesture Visual Affordances
+    private boolean orbitIndicatorActive = false;
+    private boolean orbitIndicatorEngaged = false;
+    private float orbitIndicatorX = 0f, orbitIndicatorY = 0f;
+    private long orbitIndicatorStartTime = 0;
+    private float orbitIndicatorAlpha = 0f;
+
+    // Drag trailing effect
+    private static final int DRAG_TRAIL_LEN = 12;
+    private final float[] dragTrailX = new float[DRAG_TRAIL_LEN];
+    private final float[] dragTrailY = new float[DRAG_TRAIL_LEN];
+    private final long[] dragTrailTime = new long[DRAG_TRAIL_LEN];
+    private int dragTrailCount = 0;
+    private int dragTrailHead = 0;
+
+    private void recordDragTrail(float x, float y, long now) {
+        if (dragTrailCount > 0) {
+            int latest = (dragTrailHead - 1 + DRAG_TRAIL_LEN) % DRAG_TRAIL_LEN;
+            float dx = x - dragTrailX[latest];
+            float dy = y - dragTrailY[latest];
+            if ((dx * dx + dy * dy) < 4f) return;
+        }
+        dragTrailX[dragTrailHead] = x;
+        dragTrailY[dragTrailHead] = y;
+        dragTrailTime[dragTrailHead] = now;
+        dragTrailHead = (dragTrailHead + 1) % DRAG_TRAIL_LEN;
+        if (dragTrailCount < DRAG_TRAIL_LEN) {
+            dragTrailCount++;
+        }
+    }
+
+    private void resetDragTrail() {
+        dragTrailCount = 0;
+        dragTrailHead = 0;
+    }
+
+    // Single-tap / mouse click ripple effect
+    private boolean tapRippleActive = false;
+    private float tapRippleX = 0f, tapRippleY = 0f;
+    private long tapRippleStartTime = 0;
+
+    private boolean menuDragging = false;
+    private final Runnable menuHoldRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (racing) return;
+            long now = SystemClock.uptimeMillis();
+            int res = safeMenuGestureCheckTimeout(now);
+            if (res == GESTURE_DRAG_START) {
+                menuDragging = true;
+                orbitIndicatorEngaged = true;
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                float gx = safeMenuGestureGetX();
+                float gy = safeMenuGestureGetY();
+                orbitIndicatorX = gx;
+                orbitIndicatorY = gy;
+                recordDragTrail(gx, gy, now);
+                invalidate();
+                if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
+                    try {
+                        pointerMiddle.touch(gx / getWidth(), gy / getHeight(), 0, 0f, 0f);
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+    };
 
     private int cameraTouchId = -1;
     private float cameraStartX, cameraStartY;
@@ -517,6 +745,20 @@ final class RacingControlsView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         if (hiddenByGamepad && !editing) return;
+
+        long now = SystemClock.uptimeMillis();
+        if (autoDimEnabled && !editing && racing) {
+            float nextDim = safeAutoDimUpdate(now, 3500L, 0.15f);
+            if (Math.abs(nextDim - currentDimFactor) > 0.005f) {
+                currentDimFactor = nextDim;
+                invalidate();
+            } else {
+                currentDimFactor = nextDim;
+            }
+        } else {
+            currentDimFactor = 1.0f;
+        }
+
         canvas.save();
         canvas.scale(scale, scale);
         if (editing) canvas.drawColor(0x77000000);
@@ -569,6 +811,99 @@ final class RacingControlsView extends View {
             drawToolbarButton(canvas, new RectF(cx + 75, ty + 50, cx + 205, ty + 88), "OPACITY (" + Math.round(controlOpacity * 100) + "%)", 0xE0162534, 0xAA5AC8FA, 0xFF5AC8FA);
         }
         canvas.restore();
+
+        // 3D Showroom Visual Affordances (Orbit Hold Ring & Quick Snap Burst)
+        drawShowroomAffordances(canvas);
+    }
+
+    private void triggerTapRipple(float x, float y) {
+        tapRippleActive = true;
+        tapRippleX = x;
+        tapRippleY = y;
+        tapRippleStartTime = SystemClock.uptimeMillis();
+        invalidate();
+    }
+
+    private void drawShowroomAffordances(Canvas canvas) {
+        if (racing) return;
+        long now = SystemClock.uptimeMillis();
+
+        // 1. Single-Tap / Mouse Click Ripple Effect
+        if (tapRippleActive) {
+            long elapsed = now - tapRippleStartTime;
+            if (elapsed < 260) {
+                float progress = elapsed / 260f;
+                int alpha = Math.round((1f - progress) * 190);
+                float radius = 5f + progress * 26f;
+                Paint ripplePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                ripplePaint.setStyle(Paint.Style.STROKE);
+                ripplePaint.setStrokeWidth(2.2f * (1f - progress));
+                ripplePaint.setColor((alpha << 24) | (COLOR_LIME & 0x00FFFFFF));
+                canvas.drawCircle(tapRippleX, tapRippleY, radius, ripplePaint);
+
+                if (progress < 0.40f) {
+                    Paint corePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                    corePaint.setStyle(Paint.Style.FILL);
+                    int coreAlpha = Math.round((1f - progress / 0.40f) * 150);
+                    corePaint.setColor((coreAlpha << 24) | (COLOR_LIME & 0x00FFFFFF));
+                    canvas.drawCircle(tapRippleX, tapRippleY, 5f * (1f - progress / 0.40f), corePaint);
+                }
+                invalidate();
+            } else {
+                tapRippleActive = false;
+            }
+        }
+
+        // 2. Compact Solid Round Hold Indicator
+        if (orbitIndicatorActive || orbitIndicatorAlpha > 0.01f) {
+            if (orbitIndicatorActive) {
+                if (orbitIndicatorEngaged) {
+                    orbitIndicatorAlpha = Math.min(1.0f, orbitIndicatorAlpha + 0.15f);
+                } else {
+                    long holdElapsed = now - orbitIndicatorStartTime;
+                    float progress = Math.min(1.0f, holdElapsed / 100f);
+                    orbitIndicatorAlpha = progress * 0.75f;
+                }
+            } else {
+                orbitIndicatorAlpha = Math.max(0.0f, orbitIndicatorAlpha - 0.12f);
+            }
+
+            if (orbitIndicatorAlpha > 0.01f) {
+                // 25% base opacity for solid circle
+                int a = Math.round(orbitIndicatorAlpha * 255 * 0.25f);
+                float x = orbitIndicatorX;
+                float y = orbitIndicatorY;
+
+                Paint solidPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                solidPaint.setStyle(Paint.Style.FILL);
+
+                // Trailing effect for dragging
+                if (orbitIndicatorEngaged && dragTrailCount > 1) {
+                    for (int i = 0; i < dragTrailCount; i++) {
+                        int idx = (dragTrailHead - dragTrailCount + i + DRAG_TRAIL_LEN) % DRAG_TRAIL_LEN;
+                        long age = now - dragTrailTime[idx];
+                        if (age > 240) continue;
+                        float ageFade = 1.0f - (age / 240f);
+                        float ratio = (float) (i + 1) / (float) dragTrailCount;
+                        float tRadius = (3f + ratio * 6.5f) * ageFade;
+                        int tAlpha = Math.round(ratio * ageFade * a);
+                        if (tAlpha > 0) {
+                            solidPaint.setColor((tAlpha << 24) | (COLOR_LIME & 0x00FFFFFF));
+                            canvas.drawCircle(dragTrailX[idx], dragTrailY[idx], tRadius, solidPaint);
+                        }
+                    }
+                }
+
+                solidPaint.setColor((a << 24) | (COLOR_LIME & 0x00FFFFFF));
+                float radius = orbitIndicatorEngaged ? 10f : 6f + (now - orbitIndicatorStartTime) * 0.04f;
+                radius = Math.min(radius, 10f);
+                canvas.drawCircle(x, y, radius, solidPaint);
+
+                if (orbitIndicatorActive || orbitIndicatorAlpha > 0.01f) {
+                    invalidate();
+                }
+            }
+        }
     }
 
     private static int applyAlpha(int color, float opacity) {
@@ -606,7 +941,7 @@ final class RacingControlsView extends View {
         float cx = c.area.centerX(), cy = c.area.centerY();
         float r = Math.min(c.area.width(), c.area.height()) / 2f;
 
-        float op = (c.scan == EDIT) ? Math.max(0.40f, controlOpacity) : controlOpacity;
+        float op = (c.scan == EDIT) ? Math.max(0.40f, controlOpacity) : (controlOpacity * currentDimFactor);
         float effectiveOpacity = on ? Math.min(1.0f, op * 1.4f + 0.15f) : op;
         if (editing) effectiveOpacity = 1.0f;
 
@@ -644,20 +979,20 @@ final class RacingControlsView extends View {
         text.setColor(ink);
         bitmapPaint.setAlpha(Math.max(0, Math.min(255, Math.round(255f * effectiveOpacity))));
 
-        drawIcon(canvas, c, cx, cy, r, on);
+        drawIcon(canvas, c, cx, cy, r, on, effectiveOpacity);
     }
 
-    private void drawIcon(Canvas canvas, Control c, float cx, float cy, float r, boolean on) {
+    private void drawIcon(Canvas canvas, Control c, float cx, float cy, float r, boolean on, float effectiveOpacity) {
         float s = r * 0.44f;
         line.setStrokeWidth(Math.max(2.0f, r * 0.08f));
 
         switch (c.icon) {
             case "gas":
-                glyph(canvas, "GAS", cx, cy + 2f, 18f, on);
+                glyph(canvas, "GAS", cx, cy + 2f, 18f, on, effectiveOpacity);
                 chevron(canvas, cx, cy - s * 0.9f, s * 0.6f, true);
                 break;
             case "brake":
-                glyph(canvas, "BRAKE", cx, cy + 2f, 15f, on);
+                glyph(canvas, "BRAKE", cx, cy + 2f, 15f, on, effectiveOpacity);
                 chevron(canvas, cx, cy - s * 0.75f, s * 0.55f, false);
                 break;
             case "nitro":
@@ -671,13 +1006,15 @@ final class RacingControlsView extends View {
 
                 if (on) {
                     // Distinct halos: Cyan for Purge at 0 km/h, Lime for Boost at speed
-                    int haloBg = (nitroState == 1) ? 0x5500E5FF : 0x5539FF14;
-                    int haloStroke = (nitroState == 1) ? 0xFF00E5FF : COLOR_LIME;
+                    int haloBg = applyAlpha((nitroState == 1) ? 0x5500E5FF : 0x5539FF14, effectiveOpacity);
+                    int haloStroke = applyAlpha((nitroState == 1) ? 0xFF00E5FF : COLOR_LIME, effectiveOpacity);
                     fill.setColor(haloBg);
                     canvas.drawCircle(cx, cy, r * 1.22f, fill);
                     line.setColor(haloStroke);
                     line.setStrokeWidth(2.5f);
                     canvas.drawCircle(cx, cy, r * 1.15f, line);
+                    fill.setColor(applyAlpha(on ? COLOR_LIME : COLOR_TEXT, effectiveOpacity));
+                    line.setColor(applyAlpha(on ? COLOR_LIME : COLOR_TEXT, effectiveOpacity));
                 }
 
                 if (nitroBitmap != null) {
@@ -689,7 +1026,7 @@ final class RacingControlsView extends View {
                     canvas.drawBitmap(nitroBitmap, null, nitroDestRect, bitmapPaint);
                 } else {
                     String label = (nitroState == 1) ? "PURGE" : "NOS";
-                    glyph(canvas, label, cx, cy, (nitroState == 1) ? 12f : 17f, on);
+                    glyph(canvas, label, cx, cy, (nitroState == 1) ? 12f : 17f, on, effectiveOpacity);
                 }
                 break;
             case "drift":
@@ -700,7 +1037,7 @@ final class RacingControlsView extends View {
                     driftDestRect.set(cx - bw / 2f, cy - bh / 2f, cx + bw / 2f, cy + bh / 2f);
                     canvas.drawBitmap(driftBitmap, null, driftDestRect, bitmapPaint);
                 } else {
-                    glyph(canvas, "DRIFT", cx, cy, 11f, on || driftActive);
+                    glyph(canvas, "DRIFT", cx, cy, 11f, on || driftActive, effectiveOpacity);
                 }
                 break;
             case "status":
@@ -725,7 +1062,7 @@ final class RacingControlsView extends View {
                     liftDestRect.set(cx - bw / 2f, cy - bh / 2f, cx + bw / 2f, cy + bh / 2f);
                     canvas.drawBitmap(liftBitmap, null, liftDestRect, bitmapPaint);
                 } else {
-                    glyph(canvas, "LIFT", cx, cy, 12f, on);
+                    glyph(canvas, "LIFT", cx, cy, 12f, on, effectiveOpacity);
                     chevron(canvas, cx, cy - s * 0.65f, s * 0.48f, true);
                 }
                 break;
@@ -737,24 +1074,25 @@ final class RacingControlsView extends View {
                     bounceDestRect.set(cx - bw / 2f, cy - bh / 2f, cx + bw / 2f, cy + bh / 2f);
                     canvas.drawBitmap(bounceBitmap, null, bounceDestRect, bitmapPaint);
                 } else {
-                    glyph(canvas, "BOUNCE", cx, cy, 9f, on);
+                    glyph(canvas, "BOUNCE", cx, cy, 9f, on, effectiveOpacity);
                     chevron(canvas, cx, cy - s * 0.65f, s * 0.42f, true);
                     chevron(canvas, cx, cy - s * 0.38f, s * 0.42f, true);
                 }
                 break;
             case "hb":
                 text.setTextSize(12f);
+                text.setColor(applyAlpha(on ? COLOR_LIME : COLOR_TEXT, effectiveOpacity));
                 canvas.drawText("HAND", cx, cy - 3f, text);
                 canvas.drawText("BRAKE", cx, cy + 12f, text);
                 break;
             case "start":
-                glyph(canvas, "START", cx, cy, 15f, on);
+                glyph(canvas, "START", cx, cy, 15f, on, effectiveOpacity);
                 break;
             case "accept":
-                glyph(canvas, "OK", cx, cy, 16f, on);
+                glyph(canvas, "OK", cx, cy, 16f, on, effectiveOpacity);
                 break;
             case "back":
-                glyph(canvas, "BACK", cx, cy, 16f, on);
+                glyph(canvas, "BACK", cx, cy, 16f, on, effectiveOpacity);
                 break;
             case "left":
                 drawArrow(canvas, cx, cy, s * 1.15f, 2);
@@ -859,7 +1197,7 @@ final class RacingControlsView extends View {
                 canvas.drawLine(cx - s * 0.4f, cy + s * 0.34f, cx + s * 0.4f, cy + s * 0.34f, line);
                 break;
             default:
-                glyph(canvas, c.icon, cx, cy, r * (c.icon.length() == 1 ? 1.0f : 0.6f), on);
+                glyph(canvas, c.icon, cx, cy, r * (c.icon.length() == 1 ? 1.0f : 0.6f), on, effectiveOpacity);
                 break;
         }
     }
@@ -908,8 +1246,12 @@ final class RacingControlsView extends View {
     }
 
     private void glyph(Canvas canvas, String value, float x, float y, float size, boolean on) {
+        glyph(canvas, value, x, y, size, on, 1.0f);
+    }
+
+    private void glyph(Canvas canvas, String value, float x, float y, float size, boolean on, float effectiveOpacity) {
         text.setTextSize(size);
-        text.setColor(on ? COLOR_LIME : COLOR_TEXT);
+        text.setColor(applyAlpha(on ? COLOR_LIME : COLOR_TEXT, effectiveOpacity));
         canvas.drawText(value, x, y - (text.ascent() + text.descent()) / 2f, text);
     }
 
@@ -1460,7 +1802,7 @@ final class RacingControlsView extends View {
     }
 
     private void steer(Control c, float x) {
-        c.steering = PerformanceCores.calculateSteering(x, c.area.centerX(), c.area.width() / 2f, scale);
+        c.steering = safeCalculateSCurve(x, c.area.centerX(), c.area.width() / 2f, scale, 0.04f);
         keys.set(keyLeft, c.steering < -0.18f);
         keys.set(keyRight, c.steering > 0.18f);
     }
@@ -1475,6 +1817,9 @@ final class RacingControlsView extends View {
 
     private void pointerTouch(float x, float y, int phase) {
         if (pointer == null || getWidth() == 0 || getHeight() == 0) return;
+        if (phase == 0) {
+            triggerTapRipple(x, y);
+        }
         if (phase == 1 && Math.abs(x - pointerX) < 2f && Math.abs(y - pointerY) < 2f) return;
         pointerX = x;
         pointerY = y;
@@ -1517,6 +1862,20 @@ final class RacingControlsView extends View {
 
     void releaseAll() {
         removeCallbacks(nitroWatcher);
+        removeCallbacks(menuHoldRunnable);
+        orbitIndicatorActive = false;
+        orbitIndicatorEngaged = false;
+        resetDragTrail();
+        safeMenuGestureReset();
+        if (menuDragging) {
+            menuDragging = false;
+            if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
+                try {
+                    pointerMiddle.touch(0.5f, 0.5f, 2, 0f, 0f);
+                } catch (Throwable ignored) {}
+            }
+            AdhocRoamClient.handleRightStick(0f, 0f);
+        }
         autoGasAppliedByNitro = false;
         for (int i = 0; i < 32; i++) {
             Control c = fingerMap[i];
@@ -1544,8 +1903,162 @@ final class RacingControlsView extends View {
         invalidate();
     }
 
+    private boolean handleMenuGesture(MotionEvent e, int action, int id, float x, float y) {
+        long now = SystemClock.uptimeMillis();
+        float w = getWidth(), h = getHeight();
+
+        // Direct two-finger tracking
+        if (e.getPointerCount() >= 2) {
+            orbitIndicatorActive = false;
+            orbitIndicatorEngaged = false;
+            resetDragTrail();
+            float p0x = e.getX(0), p0y = e.getY(0);
+            float p1x = e.getX(1), p1y = e.getY(1);
+            float midX = (p0x + p1x) * 0.5f;
+            float midY = (p0y + p1y) * 0.5f;
+
+            if (!twoFingerActive) {
+                removeCallbacks(menuHoldRunnable);
+                safeMenuGestureReset();
+                twoFingerActive = true;
+                twoFingerId1 = e.getPointerId(0);
+                twoFingerId2 = e.getPointerId(1);
+                twoFingerLastMidX = midX;
+                twoFingerLastMidY = midY;
+                if (pointerMiddle != null && w > 0 && h > 0) {
+                    try {
+                        pointerMiddle.touch(midX / w, midY / h, 0, 0f, 0f);
+                    } catch (Throwable ignored) {}
+                }
+                return true;
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                float dx = (midX - twoFingerLastMidX) / Math.max(1f, w);
+                float dy = (midY - twoFingerLastMidY) / Math.max(1f, h);
+                twoFingerLastMidX = midX;
+                twoFingerLastMidY = midY;
+                if (pointerMiddle != null && w > 0 && h > 0) {
+                    try {
+                        pointerMiddle.touch(midX / w, midY / h, 1, dx, dy);
+                    } catch (Throwable ignored) {}
+                }
+                AdhocRoamClient.handleRightStick(dx * 40f, dy * 40f);
+                return true;
+            }
+        }
+
+        if (twoFingerActive && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL || e.getPointerCount() < 2)) {
+            twoFingerActive = false;
+            twoFingerId1 = -1;
+            twoFingerId2 = -1;
+            if (pointerMiddle != null && w > 0 && h > 0) {
+                try {
+                    pointerMiddle.touch(twoFingerLastMidX / w, twoFingerLastMidY / h, 2, 0f, 0f);
+                } catch (Throwable ignored) {}
+            }
+            AdhocRoamClient.handleRightStick(0f, 0f);
+            return true;
+        }
+
+        // Single-finger gesture disambiguation in pure Rust (Hold >100ms = Drag/Rotate, Tap <100ms = Click)
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            removeCallbacks(menuHoldRunnable);
+            menuDragging = false;
+            resetDragTrail();
+            orbitIndicatorX = x;
+            orbitIndicatorY = y;
+            orbitIndicatorStartTime = now;
+            orbitIndicatorActive = true;
+            orbitIndicatorEngaged = false;
+            safeMenuGestureProcess(action, id, x, y, now, w, h);
+            postDelayed(menuHoldRunnable, 105);
+            invalidate();
+            return true;
+        } else if (action == MotionEvent.ACTION_MOVE) {
+            boolean moved = false;
+            for (int i = 0; i < e.getPointerCount(); i++) {
+                int pid = e.getPointerId(i);
+                int res = safeMenuGestureProcess(action, pid, e.getX(i), e.getY(i), now, w, h);
+                if (res == GESTURE_DRAG_MOVE) {
+                    removeCallbacks(menuHoldRunnable);
+                    menuDragging = true;
+                    moved = true;
+                    orbitIndicatorEngaged = true;
+                    orbitIndicatorActive = true;
+                    float gx = safeMenuGestureGetX();
+                    float gy = safeMenuGestureGetY();
+                    orbitIndicatorX = gx;
+                    orbitIndicatorY = gy;
+                    recordDragTrail(gx, gy, now);
+                    float dx = safeMenuGestureGetDx();
+                    float dy = safeMenuGestureGetDy();
+                    if (pointerMiddle != null && w > 0 && h > 0) {
+                        try {
+                            pointerMiddle.touch(gx / w, gy / h, 1, dx, dy);
+                        } catch (Throwable ignored) {}
+                    }
+                    AdhocRoamClient.handleRightStick(dx * 40f, dy * 40f);
+                    invalidate();
+                }
+            }
+            return moved || menuDragging;
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            removeCallbacks(menuHoldRunnable);
+            orbitIndicatorActive = false;
+            orbitIndicatorEngaged = false;
+            resetDragTrail();
+            invalidate();
+            int res = safeMenuGestureProcess(action, id, x, y, now, w, h);
+            if (res == GESTURE_CLICK) {
+                final float gx = safeMenuGestureGetX();
+                final float gy = safeMenuGestureGetY();
+                pointerTouch(gx, gy, 0);
+                postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        pointerTouch(gx, gy, 2);
+                    }
+                }, 35);
+            } else if (res == GESTURE_DRAG_END || menuDragging) {
+                menuDragging = false;
+                float gx = safeMenuGestureGetX();
+                float gy = safeMenuGestureGetY();
+                if (pointerMiddle != null && w > 0 && h > 0) {
+                    try {
+                        pointerMiddle.touch(gx / w, gy / h, 2, 0f, 0f);
+                    } catch (Throwable ignored) {}
+                }
+                AdhocRoamClient.handleRightStick(0f, 0f);
+            }
+            return true;
+        } else if (action == MotionEvent.ACTION_CANCEL) {
+            removeCallbacks(menuHoldRunnable);
+            orbitIndicatorActive = false;
+            orbitIndicatorEngaged = false;
+            resetDragTrail();
+            safeMenuGestureReset();
+            if (menuDragging) {
+                menuDragging = false;
+                if (pointerMiddle != null && w > 0 && h > 0) {
+                    try {
+                        pointerMiddle.touch(x / w, y / h, 2, 0f, 0f);
+                    } catch (Throwable ignored) {}
+                }
+                AdhocRoamClient.handleRightStick(0f, 0f);
+            }
+            invalidate();
+            return true;
+        }
+        return false;
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent e) {
+        long now = SystemClock.uptimeMillis();
+        safeAutoDimTouch(now);
+        if (currentDimFactor < 0.95f) {
+            currentDimFactor = 1.0f;
+            invalidate();
+        }
         if (editing) return editTouch(e);
         int action = e.getActionMasked(), index = e.getActionIndex(), id = e.getPointerId(index);
         try {
@@ -1567,62 +2080,8 @@ final class RacingControlsView extends View {
                     return true;
                 }
             }
-            if (!racing && e.getPointerCount() >= 2) {
-                float p0x = e.getX(0), p0y = e.getY(0);
-                float p1x = e.getX(1), p1y = e.getY(1);
-                float midX = (p0x + p1x) * 0.5f;
-                float midY = (p0y + p1y) * 0.5f;
-
-                if (!twoFingerActive) {
-                    pointerRelease();
-                    twoFingerActive = true;
-                    twoFingerId1 = e.getPointerId(0);
-                    twoFingerId2 = e.getPointerId(1);
-                    twoFingerLastMidX = midX;
-                    twoFingerLastMidY = midY;
-                    if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
-                        try {
-                            pointerMiddle.touch(midX / getWidth(), midY / getHeight(), 0, 0f, 0f);
-                        } catch (Throwable ignored) {}
-                    }
-                    return true;
-                } else if (action == MotionEvent.ACTION_MOVE) {
-                    float dx = (midX - twoFingerLastMidX) / (float)Math.max(1, getWidth());
-                    float dy = (midY - twoFingerLastMidY) / (float)Math.max(1, getHeight());
-                    twoFingerLastMidX = midX;
-                    twoFingerLastMidY = midY;
-                    if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
-                        try {
-                            pointerMiddle.touch(midX / getWidth(), midY / getHeight(), 1, dx, dy);
-                        } catch (Throwable ignored) {}
-                    }
-                    return true;
-                }
-            }
-            if (twoFingerActive && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL || e.getPointerCount() < 2)) {
-                twoFingerActive = false;
-                twoFingerId1 = -1;
-                twoFingerId2 = -1;
-                if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
-                    try {
-                        pointerMiddle.touch(twoFingerLastMidX / getWidth(), twoFingerLastMidY / getHeight(), 2, 0f, 0f);
-                    } catch (Throwable ignored) {}
-                }
-                return true;
-            }
             if (!racing) {
-                if (action == MotionEvent.ACTION_DOWN && pointerId < 0) {
-                    pointerId = id;
-                    pointerTouch(e.getX(index), e.getY(index), 0);
-                    return true;
-                } else if (action == MotionEvent.ACTION_MOVE && id == pointerId) {
-                    pointerTouch(e.getX(index), e.getY(index), 1);
-                    return true;
-                } else if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) && id == pointerId) {
-                    pointerId = -1;
-                    pointerTouch(e.getX(index), e.getY(index), 2);
-                    return true;
-                }
+                return handleMenuGesture(e, action, id, e.getX(index), e.getY(index));
             } else {
                 if ((action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) && cameraTouchId < 0) {
                     cameraTouchId = id;
@@ -1656,57 +2115,61 @@ final class RacingControlsView extends View {
         }
 
         if (action == MotionEvent.ACTION_CANCEL) {
+            if (!racing) handleMenuGesture(e, action, id, 0, 0);
             releaseAll();
             return true;
         }
 
-        // Two-finger car rotation in garage / frontend (matching nfsu2-web)
-        if (!racing && e.getPointerCount() >= 2) {
-            float p0x = e.getX(0), p0y = e.getY(0);
-            float p1x = e.getX(1), p1y = e.getY(1);
-            float midX = (p0x + p1x) * 0.5f;
-            float midY = (p0y + p1y) * 0.5f;
-
-            if (!twoFingerActive) {
-                pointerRelease();
-                twoFingerActive = true;
-                twoFingerId1 = e.getPointerId(0);
-                twoFingerId2 = e.getPointerId(1);
-                twoFingerLastMidX = midX;
-                twoFingerLastMidY = midY;
-                if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
-                    try {
-                        pointerMiddle.touch(midX / getWidth(), midY / getHeight(), 0, 0f, 0f);
-                    } catch (Throwable ignored) {}
+        if (!racing) {
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+                Control c = hit(e.getX(index), e.getY(index));
+                if (c != null) {
+                    release(putFinger(id, c));
+                    hold(c);
+                    invalidate();
+                    return true;
                 }
-                return true;
+                return handleMenuGesture(e, action, id, e.getX(index), e.getY(index));
             } else if (action == MotionEvent.ACTION_MOVE) {
-                float dx = (midX - twoFingerLastMidX) / (float)Math.max(1, getWidth());
-                float dy = (midY - twoFingerLastMidY) / (float)Math.max(1, getHeight());
-                twoFingerLastMidX = midX;
-                twoFingerLastMidY = midY;
-                if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
-                    try {
-                        pointerMiddle.touch(midX / getWidth(), midY / getHeight(), 1, dx, dy);
-                    } catch (Throwable ignored) {}
+                if (menuDragging) {
+                    return handleMenuGesture(e, action, id, 0, 0);
                 }
-                return true;
+                boolean anyControl = false;
+                for (int i = 0; i < e.getPointerCount(); i++) {
+                    int pid = e.getPointerId(i);
+                    if (getFinger(pid) != null) anyControl = true;
+                }
+                if (!anyControl) {
+                    return handleMenuGesture(e, action, id, 0, 0);
+                }
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+                Control c = removeFinger(id);
+                if (c != null) {
+                    release(c);
+                    if (c == hit(e.getX(index), e.getY(index))) {
+                        if (c.scan == MODE) {
+                            style = style.equals("stick") ? "classic" : "stick";
+                            layouts.edit().putString("style", style).apply();
+                            layoutControls();
+                        } else if (c.scan == TEXT) {
+                            releaseAll();
+                            textInput.run();
+                        } else if (c.scan == EDIT) {
+                            releaseAll();
+                            setEditing(true);
+                            selected = null;
+                        }
+                        performClick();
+                    }
+                    if (action == MotionEvent.ACTION_UP) releaseAll();
+                    invalidate();
+                    return true;
+                }
+                return handleMenuGesture(e, action, id, e.getX(index), e.getY(index));
             }
         }
 
-        if (twoFingerActive && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL || e.getPointerCount() < 2)) {
-            twoFingerActive = false;
-            twoFingerId1 = -1;
-            twoFingerId2 = -1;
-            if (pointerMiddle != null && getWidth() > 0 && getHeight() > 0) {
-                try {
-                    pointerMiddle.touch(twoFingerLastMidX / getWidth(), twoFingerLastMidY / getHeight(), 2, 0f, 0f);
-                } catch (Throwable ignored) {}
-            }
-            if (action == MotionEvent.ACTION_UP) releaseAll();
-            return true;
-        }
-
+        // --- Driving Mode Multi-Touch ---
         if (action == MotionEvent.ACTION_DOWN) {
             releaseAll();
         } else if (action == MotionEvent.ACTION_POINTER_UP) {
@@ -1717,10 +2180,7 @@ final class RacingControlsView extends View {
             Control c = hit(e.getX(index), e.getY(index));
             if (c != null && c.scan == STICK && c.held > 0) c = null;
             if (c == null && hit(e.getX(index), e.getY(index)) == null) {
-                if (!racing && pointerId < 0) {
-                    pointerId = id;
-                    pointerTouch(e.getX(index), e.getY(index), 0);
-                } else if (racing && cameraTouchId < 0) {
+                if (racing && cameraTouchId < 0) {
                     cameraTouchId = id;
                     cameraStartX = e.getX(index);
                     cameraStartY = e.getY(index);
@@ -1733,10 +2193,6 @@ final class RacingControlsView extends View {
             boolean changed = false;
             for (int i = 0; i < e.getPointerCount(); ++i) {
                 int pointer = e.getPointerId(i);
-                if (pointer == pointerId) {
-                    if (!racing) pointerTouch(e.getX(i), e.getY(i), 1);
-                    continue;
-                }
                 if (racing && pointer == cameraTouchId) {
                     float dx = (e.getX(i) - cameraStartX) / (getWidth() * 0.20f);
                     float dy = (e.getY(i) - cameraStartY) / (getHeight() * 0.20f);
@@ -1769,10 +2225,6 @@ final class RacingControlsView extends View {
             if (changed) invalidate();
             return true;
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
-            if (id == pointerId) {
-                pointerId = -1;
-                if (!racing) pointerTouch(e.getX(index), e.getY(index), 2);
-            }
             if (racing && id == cameraTouchId) {
                 cameraTouchId = -1;
                 AdhocRoamClient.handleRightStick(0f, 0f);

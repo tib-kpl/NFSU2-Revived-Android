@@ -8,6 +8,23 @@ import android.content.SharedPreferences;
  * runtime before the guest boots; changing one takes effect on the next PLAY.
  */
 public final class GameOptions {
+    private static volatile boolean nativeLoaded = false;
+    static {
+        try {
+            System.loadLibrary("graphics_cache");
+            nativeLoaded = true;
+        } catch (Throwable ignored) {}
+        try {
+            System.loadLibrary("game_core");
+            nativeLoaded = true;
+        } catch (Throwable ignored) {}
+    }
+
+    private static native boolean nativeSyncWidescreenIni(String path, int resX, int resY, int hudMode, int aspect, int skipIntro, int cutsceneBorders, int padSupport, String feScale);
+    private static native boolean nativeSyncWidescreenDat(String path, boolean logsEnabled);
+    private static native boolean nativeSyncExtraOptionsIni(String path, boolean regional, boolean lapCtrl, boolean oppCtrl, boolean lapPct, boolean drift, boolean fixes, boolean menu);
+    private static native int nativeDetectRegion(String gameRoot);
+
     static final class Option {
         final String key, defaultValue;
         final int titleRes;
@@ -42,7 +59,8 @@ public final class GameOptions {
             ROAM_CARS_LIMIT = "roam_max_cars", ROAM_CREW = "roam_crew",
             GRAPHICS_BACKEND = "graphics_backend", DRAW_DISTANCE = "draw_distance",
             TRACKSIDE_CROWDS = "trackside_crowds", REGION = "region", SPEEDOMETER = "speedometer", PAD_LAYOUT = "pad_layout",
-            AUTO_LAUNCH = "auto_launch";
+            AUTO_LAUNCH = "auto_launch",
+            CUSTOM_GAME_DIR = "custom_game_dir";
 
     static final Option[] ALL = {
             new Option(GRAPHICS_BACKEND, R.string.opt_graphics_api, "auto",
@@ -196,6 +214,16 @@ public final class GameOptions {
      * with the European SKU. Returns 1 (EU) if found, -1 (game default / NA) otherwise.
      */
     static int detectRegionFromFiles(Context context) {
+        if (nativeLoaded) {
+            try {
+                java.io.File gr = LauncherActivity.gameRoot();
+                int detected = nativeDetectRegion(gr != null ? gr.getAbsolutePath() : "");
+                if (detected != -1) {
+                    android.util.Log.i("NFSU2", "Region auto-detect via native game_core: found GLOBALTEXTURESROW.BIN → EU (1)");
+                    return detected;
+                }
+            } catch (Throwable ignored) {}
+        }
         try {
             String[] candidates = {
                 LauncherActivity.gameRoot() + "/GLOBALTEXTURESROW.BIN",
@@ -225,6 +253,12 @@ public final class GameOptions {
             if ("ps2".equals(value)) value = "console";
             else if ("default".equals(value) || "xbox".equals(value)) value = "port";
         }
+        if (FPS.equals(key)) {
+            // Automatic migration of legacy 30 FPS default to 60 FPS
+            if ("30".equals(value) && !prefs(context).getBoolean("fps_explicitly_set_v2", false)) {
+                value = "60";
+            }
+        }
         if (WIDESCREEN.equals(key) && ("stretched".equals(value) || "hud".equals(value))) value = "off";
         for (String allowed : o.values) if (allowed.equals(value)) return value;
         return o.defaultValue;
@@ -236,6 +270,9 @@ public final class GameOptions {
     }
 
     static void set(Context context, String key, String value) {
+        if (FPS.equals(key)) {
+            prefs(context).edit().putBoolean("fps_explicitly_set_v2", true).apply();
+        }
         prefs(context).edit().putString(key, value).apply();
     }
 
@@ -685,6 +722,15 @@ public final class GameOptions {
             }
             if (!datFile.isFile()) return;
 
+            if (nativeLoaded) {
+                try {
+                    if (nativeSyncWidescreenDat(datFile.getAbsolutePath(), logsEnabled)) {
+                        android.util.Log.i("NFSU2", "Synchronized WidescreenFix.dat layout via native game_core (logsEnabled=" + logsEnabled + ")");
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+            }
+
             java.util.List<String> lines = new java.util.ArrayList<>();
             boolean changed = false;
             try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(datFile))) {
@@ -790,12 +836,6 @@ public final class GameOptions {
             }
             if (!iniFile.isFile()) return;
 
-            java.util.List<String> lines = new java.util.ArrayList<>();
-            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(iniFile))) {
-                String line;
-                while ((line = br.readLine()) != null) lines.add(line);
-            }
-
             boolean regional = getExtraOption(context, "regional_cars", true);
             boolean lapCtrl = getExtraOption(context, "lap_controller", true);
             boolean oppCtrl = getExtraOption(context, "opponent_controller", true);
@@ -803,6 +843,21 @@ public final class GameOptions {
             boolean drift = getExtraOption(context, "drift_tweaks", true);
             boolean fixes = getExtraOption(context, "fixes_3d", true);
             boolean menu = getExtraOption(context, "menu_enhancements", true);
+
+            if (nativeLoaded) {
+                try {
+                    if (nativeSyncExtraOptionsIni(iniFile.getAbsolutePath(), regional, lapCtrl, oppCtrl, lapPct, drift, fixes, menu)) {
+                        android.util.Log.i("NFSU2", "Synchronized Extra Options settings via native game_core in " + iniFile.getAbsolutePath());
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            java.util.List<String> lines = new java.util.ArrayList<>();
+            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(iniFile))) {
+                String line;
+                while ((line = br.readLine()) != null) lines.add(line);
+            }
 
             java.util.List<String> out = new java.util.ArrayList<>();
             for (String l : lines) {

@@ -1,5 +1,6 @@
 package io.mininxd.nfsu2;
 
+import java.io.File;
 import android.app.NativeActivity;
 import android.os.Build;
 import android.os.Environment;
@@ -36,7 +37,7 @@ public final class GameActivity extends NativeActivity {
         "Welcome to Need for Speed Underground 2 Revived.\r\n\r\n" +
         "Engine Architecture & Core:\r\n" +
         "- Lifted Core: Original SPEED2.EXE x86 binary statically lifted to native 64-bit ARM64 C and Rust.\r\n" +
-        "- Graphics Pipeline: Mobile DXVK Vulkan & GLES translation with dynamic GPU command deduplication.\r\n" +
+        "- Graphics Pipeline: Direct3D 9 with Vulkan & OpenGL ES acceleration.\r\n" +
         "- Audio Subsystem: Low-latency AAudio driver with DirectSound buffer cursor tracking running on pure Rust.\r\n" +
         "- Preservation Project: Developed as an open-source fan preservation effort. Source code available on GitHub:\r\n" +
         "  https://github.com/mininxd/NFSU2-Revived-Android\r\n\r\n" +
@@ -44,9 +45,6 @@ public final class GameActivity extends NativeActivity {
         "%{%}";
 
     static {
-        try {
-            System.loadLibrary("dxvk_android");
-        } catch (Throwable ignored) {}
         try {
             System.loadLibrary("game_core");
         } catch (Throwable ignored) {}
@@ -112,6 +110,44 @@ public final class GameActivity extends NativeActivity {
     private boolean statusHidden;
     private Runnable statusHideTask;
     private final boolean[] touchKeys=new boolean[256],sentKeys=new boolean[256];
+
+    private static native float nativeTiltProcess(float rawHorizontal, float sensitivity, boolean invert, float deadzone);
+    private static native void nativeTiltCalibrate();
+    private static native void nativeTiltReset();
+    private static native float nativeDInputRadialX(float x, float y, float deadzone, float curveWeight);
+    private static native float nativeDInputRadialY(float x, float y, float deadzone, float curveWeight);
+
+    private static float safeTiltProcess(float rawHorizontal, float sensitivity, boolean invert, float deadzone) {
+        try {
+            return nativeTiltProcess(rawHorizontal, sensitivity, invert, deadzone);
+        } catch (Throwable ignored) {
+            float turn = rawHorizontal * sensitivity * (invert ? -1 : 1);
+            return Math.max(-1f, Math.min(1f, turn));
+        }
+    }
+
+    private static void safeTiltCalibrate() {
+        try {
+            nativeTiltCalibrate();
+        } catch (Throwable ignored) {}
+    }
+
+    private static float safeDInputRadialX(float x, float y, float deadzone, float curveWeight) {
+        try {
+            return nativeDInputRadialX(x, y, deadzone, curveWeight);
+        } catch (Throwable ignored) {
+            return Math.abs(x) > deadzone ? x : 0f;
+        }
+    }
+
+    private static float safeDInputRadialY(float x, float y, float deadzone, float curveWeight) {
+        try {
+            return nativeDInputRadialY(x, y, deadzone, curveWeight);
+        } catch (Throwable ignored) {
+            return Math.abs(y) > deadzone ? y : 0f;
+        }
+    }
+
     private boolean tiltLeft,tiltRight,tiltEnabled,tiltCalibrate=true;
     private float tiltFiltered,tiltNeutral,tiltSensitivity=1;
     private boolean tiltInvert;
@@ -123,11 +159,15 @@ public final class GameActivity extends NativeActivity {
             int rotation=getWindowManager().getDefaultDisplay().getRotation();
             float horizontal=rotation==android.view.Surface.ROTATION_90?-event.values[1]:
                     rotation==android.view.Surface.ROTATION_270?event.values[1]:event.values[0];
-            if(tiltCalibrate) {tiltNeutral=horizontal;tiltFiltered=horizontal;tiltCalibrate=false;}
-            tiltFiltered+=.2f*(horizontal-tiltFiltered);
-            float turn=(tiltFiltered-tiltNeutral)*tiltSensitivity*(tiltInvert?-1:1);
+            if(tiltCalibrate) {
+                tiltNeutral=horizontal;
+                tiltFiltered=horizontal;
+                tiltCalibrate=false;
+                safeTiltCalibrate();
+            }
+            float turn = safeTiltProcess(horizontal, tiltSensitivity, tiltInvert, 0.04f);
             if(!foreground||!hasWindowFocus()||!tiltEnabled||touchControls==null||!touchControls.isDriving()) {setTiltKeys(false,false);return;}
-            setTiltKeys(turn<-(tiltLeft?.5f:.8f),turn>(tiltRight?.5f:.8f));
+            setTiltKeys(turn < -0.15f, turn > 0.15f);
         }
     };
     private int keyLeft = 0xcb;
@@ -365,6 +405,7 @@ public final class GameActivity extends NativeActivity {
         // The native runtime opens its data relative to the working directory: enter the chosen game folder first.
         StorageFix.enter(LauncherActivity.gameRoot());
         super.onCreate(saved);
+        LauncherActivity.sAppContext = getApplicationContext();
         s_instance = this;
         refreshNewsAsync();
         GameOptions.syncWidescreenIni(this);
@@ -416,6 +457,14 @@ public final class GameActivity extends NativeActivity {
             android.system.Os.setenv("NFSU2_DUMB_AI", dumbAI ? "1" : "0", true);
 
             boolean extraOptions = GameOptions.isExtraOptionsEnabled(this);
+            try {
+                File root = LauncherActivity.gameRoot();
+                if (new File(root, "dinput8.dll").exists() ||
+                    new File(root, "scripts/NFSU2ExtraOptions.asi").exists() ||
+                    new File(root, "NFSU2ExtraOptions.asi").exists()) {
+                    extraOptions = true;
+                }
+            } catch (Throwable ignored) {}
             android.system.Os.setenv("NFSU2_EXTRA_OPTIONS", extraOptions ? "1" : "0", true);
 
             android.system.Os.setenv("NFSU2_AUTOSAVE", "1", true);
@@ -437,11 +486,11 @@ public final class GameActivity extends NativeActivity {
             android.system.Os.setenv("NFSU2_RENDERER", backend, true);
 
             String drawDist = GameOptions.get(this, GameOptions.DRAW_DISTANCE);
-            distVal = 175.0f;
-            if ("ultra_performance".equals(drawDist)) distVal = 75.0f;
-            else if ("performance".equals(drawDist)) distVal = 175.0f;
-            else if ("balanced".equals(drawDist)) distVal = 350.0f;
-            else if ("extended".equals(drawDist)) distVal = 600.0f;
+            distVal = 275.0f;
+            if ("ultra_performance".equals(drawDist)) distVal = 175.0f;
+            else if ("performance".equals(drawDist)) distVal = 275.0f;
+            else if ("balanced".equals(drawDist)) distVal = 450.0f;
+            else if ("extended".equals(drawDist)) distVal = 700.0f;
             else if ("original".equals(drawDist)) distVal = 0.0f;
             android.system.Os.setenv("NFSU2_DRAW_DISTANCE", String.valueOf((int)distVal), true);
 
@@ -912,6 +961,9 @@ public final class GameActivity extends NativeActivity {
         InputLog.onGenericMotionEvent(event);
         if ((event.getSource() & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK
                 && event.getAction() == android.view.MotionEvent.ACTION_MOVE) {
+            if (touchControls != null) {
+                touchControls.notifyGamepadActive(true);
+            }
             float rx_z = event.getAxisValue(android.view.MotionEvent.AXIS_Z);
             float rx_rot = event.getAxisValue(android.view.MotionEvent.AXIS_RX);
             float rx = Math.abs(rx_rot) >= Math.abs(rx_z) ? rx_rot : rx_z;

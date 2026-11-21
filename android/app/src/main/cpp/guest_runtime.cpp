@@ -202,7 +202,26 @@ void yieldGuestMachine(unsigned milliseconds=0,std::chrono::steady_clock::time_p
     if(!machineLease||!machineLease->owns_lock())throw GuestStop("Guest scheduler ownership missing");
     {auto& trace=currentTrace();trace.func=g_cur_func;trace.esp=g_esp;}
     State saved;saved.save();machineLease->unlock();
-    if(deadline!=std::chrono::steady_clock::time_point{})std::this_thread::sleep_until(deadline);
+    if(deadline!=std::chrono::steady_clock::time_point{}) {
+        auto now = std::chrono::steady_clock::now();
+        if (deadline > now) {
+            auto remaining = deadline - now;
+            // Hybrid precision pacing: if remaining > 2.5ms, sleep for (remaining - 1.5ms)
+            // so background workers can run, then active-spin the final 1.5ms using ARM yield.
+            // This prevents kernel sleep overshoots and stops Linux schedutil/PowerHAL
+            // from downclocking CPU/GPU cores into 30% low-frequency idle states!
+            if (remaining > std::chrono::microseconds(2500)) {
+                std::this_thread::sleep_for(remaining - std::chrono::microseconds(1500));
+            }
+            while (std::chrono::steady_clock::now() < deadline) {
+#if defined(__aarch64__)
+                asm volatile("yield" ::: "memory");
+#else
+                std::this_thread::yield();
+#endif
+            }
+        }
+    }
     else if(milliseconds)std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));else std::this_thread::yield();
     machineLease->lock();saved.load();
 }
@@ -229,7 +248,7 @@ void checkGuestProgress() {
     if((++checkpoints&63u)==0){
         auto now=std::chrono::steady_clock::now();
         if(now>bootDeadline)throw GuestStop("CRT bring-up time budget reached at "+hex(g_cur_func));
-        auto slice=renderThread?std::chrono::microseconds(16000):std::chrono::microseconds(1000);
+        auto slice=renderThread?std::chrono::microseconds(50000):std::chrono::microseconds(2000);
         if(now-machine.acquired>=slice&&machine.hasWaiters()){
             yieldGuestMachine();
             if(renderThread){++renderYields;renderWait+=std::chrono::steady_clock::now()-now;}
@@ -287,6 +306,14 @@ bool guestModuleExport(uint32_t handle,const std::string& name,uint32_t& va);
 bool isGuestModule(uint32_t handle);
 void moduleHandle() {
     if(!arg(0)) { ret(imageBase,1); return; }
+    static auto s_rust_mod = reinterpret_cast<uint32_t(*)(const char*)>(
+        dlsym(RTLD_DEFAULT, "rust_shim_get_module_handle_a")
+    );
+    if(s_rust_mod) {
+        const char* nameStr = static_cast<const char*>(ptr(arg(0), 1));
+        uint32_t r = s_rust_mod(nameStr);
+        if(r != 0) { ret(r, 1); return; }
+    }
     auto name=lower(guestString(arg(0)));
     auto separator=name.find_last_of("/\\"); if(separator!=std::string::npos) name=name.substr(separator+1);
     if(name=="speed2.exe") { ret(imageBase,1); return; }
@@ -344,6 +371,17 @@ void d3dDispatch(){
             if(!s_roam_tick)s_roam_tick=reinterpret_cast<void(*)()>(dlsym(RTLD_DEFAULT,"nfs_roam_frame_tick"));
         }
         if(s_roam_tick)s_roam_tick();
+        static uint64_t s_last_token_ns = 0;
+        struct timespec ts_t;
+        clock_gettime(CLOCK_MONOTONIC, &ts_t);
+        uint64_t now_token_ns = (uint64_t)ts_t.tv_sec * 1000000000ULL + (uint64_t)ts_t.tv_nsec;
+        if (s_last_token_ns > 0 && now_token_ns > s_last_token_ns) {
+            uint64_t dur_ns = now_token_ns - s_last_token_ns;
+            static void(*s_metrics_tok)(uint64_t) = nullptr;
+            if(!s_metrics_tok) s_metrics_tok = reinterpret_cast<void(*)(uint64_t)>(dlsym(RTLD_DEFAULT, "nfs_metrics_record_frame"));
+            if(s_metrics_tok) s_metrics_tok(dur_ns);
+        }
+        s_last_token_ns = now_token_ns;
         updateDumbAIState();
         serviceGuestSound();
         lastPresentMs=steadyMs();
@@ -358,6 +396,7 @@ void d3dDispatch(){
             // machine while this thread waits. Late frames incur no extra delay.
             renderThread=true;
             if(deadline>now)yieldGuestMachine(0,deadline);
+            else if(machine.hasWaiters())yieldGuestMachine(0);
         } else {
             // Window temporarily unavailable or device lost during incoming call / backgrounding.
             // Sleep 16ms so the guest doesn't spin at 100% CPU starving audio/compositor threads.
@@ -1222,10 +1261,13 @@ void setGuestPointerMiddle(float x,float y,int phase,float dx,float dy){
     {
         std::lock_guard<std::mutex> lock(inputMutex);
         inputMouseButtons[2]=(phase!=2)?0x80:0;
-        int32_t mx=int32_t(dx*(renderWidth?renderWidth:640));
-        int32_t my=int32_t(dy*(renderHeight?renderHeight:480));
+        int32_t mx=int32_t(dx*(renderWidth?renderWidth:640)*2.5f);
+        int32_t my=int32_t(dy*(renderHeight?renderHeight:480)*2.5f);
         inputMouseX+=mx;
         inputMouseY+=my;
+    }
+    if(memory&&memory->writable(0x008763f7u,1)){
+        *static_cast<uint8_t*>(ptr(0x008763f7u,1))=(phase!=2)?1:0;
     }
     enqueueGuestPointerMiddle(phase);
 }

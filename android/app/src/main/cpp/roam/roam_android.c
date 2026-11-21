@@ -96,6 +96,9 @@ extern uint32_t nfs_rust_crowd_suppressed_frames(void);
 extern int nfs_rust_apply_engine_pacing(uint8_t *mem_base, float real_elapsed);
 extern void nfs_rust_set_contrast_mode(uint32_t mode);
 extern uint32_t nfs_rust_get_contrast_mode(void);
+#else
+static inline void nfs_rust_set_crowd_suppression(int enable) { (void)enable; }
+static inline int nfs_rust_apply_engine_pacing(uint8_t *mem_base, float real_elapsed) { (void)mem_base; (void)real_elapsed; return 0; }
 #endif
 
 #define G_CARPOOL_KB     0x007fa9d4u
@@ -696,6 +699,11 @@ typedef void (*recomp_hook_func_t)(uint32_t va);
 static recomp_void_func_t s_orig_4a5d90 = NULL;
 static recomp_void_func_t s_orig_5c7ec0 = NULL;
 static recomp_void_func_t s_orig_5caad0 = NULL;
+static recomp_void_func_t s_orig_4172d0 = NULL;
+static recomp_void_func_t s_orig_5ff490 = NULL;
+static recomp_void_func_t s_orig_492e10 = NULL;
+static recomp_void_func_t s_orig_61ad80 = NULL;
+static recomp_void_func_t s_orig_483b40 = NULL;
 static recomp_hook_func_t s_orig_recomp_hook = NULL;
 
 static recomp_void_func_t arm64_inline_hook(void *target_func, void *hook_func) {
@@ -794,7 +802,7 @@ static void hook_sub_004a5d90(void) {
 
     int busy = (rh_mem_committed(G_FE_BUSY, 4) && MR32(G_FE_BUSY) != 0);
 
-    if ((x == 0.f && y == 0.f) || busy) {
+    if (x == 0.f && y == 0.f) {
         if (turning == v) {
             MRF32(v + VW_TURN) = 0.f;
             MRF32(v + VW_TILT) = 0.f;
@@ -1029,8 +1037,8 @@ static void hook_sub_005c7ec0(void) {
                     look_process_view(view_id, cam);
                 }
                 if (dd >= 30.0f && (view_id >= 1u && view_id <= 5u)) {
-                    max_far = (view_id == 3u || view_id == 4u) ? (dd * 0.75f) : dd;
-                    if ((view_id == 3u || view_id == 4u) && max_far < 35.0f) max_far = 35.0f;
+                    max_far = (view_id == 4u) ? 70.0f : ((view_id == 3u) ? (dd * 0.75f) : dd);
+                    if (view_id == 3u && max_far < 35.0f) max_far = 35.0f;
                     if (cam && rh_mem_committed(cam + 0xC0u, 4)) {
                         if (MRF32(cam + 0xC0u) > max_far) {
                             MRF32(cam + 0xC0u) = max_far;
@@ -1063,8 +1071,12 @@ static void hook_sub_005caad0(void) {
         if (rh_mem_committed(view4 + 0x40u, 4)) {
             uint32_t cam4 = MR32(view4 + 0x40u);
             if (cam4 >= 0x10000u && rh_mem_committed(cam4 + 0xC0u, 4)) {
-                if (MRF32(cam4 + 0xC0u) < 1000.0f) {
-                    MRF32(cam4 + 0xC0u) = 10000.0f;
+                // Bound road reflection camera FarZ to 70m max.
+                // Setting 10,000m causes the entire city geometry to be drawn twice
+                // on wet/puddle world sections, overflowing Mali Valhall TBDR tile buffers.
+                float refl_far = 70.0f;
+                if (MRF32(cam4 + 0xC0u) > refl_far || MRF32(cam4 + 0xC0u) < 10.0f) {
+                    MRF32(cam4 + 0xC0u) = refl_far;
                 }
             }
         }
@@ -1083,10 +1095,13 @@ static void hook_sub_005caad0(void) {
     }
 
     uint32_t user_contrast = 0;
-    uint32_t user_ob = 0;
     if (do_bypass) {
+        uint32_t master_contrast = 0;
+        if (rh_mem_committed(0x00876518u, 4)) {
+            master_contrast = MR32(0x00876518u);
+        }
         if (rh_mem_committed(0x00870D00u, 4)) {
-            user_contrast = MR32(0x00870D00u);
+            user_contrast = MR32(0x00870D00u) | master_contrast;
             if (s_set_contrast_active) {
                 s_set_contrast_active(user_contrast);
             }
@@ -1095,8 +1110,10 @@ static void hook_sub_005caad0(void) {
             MR32(0x00870D00u) = 0;
         }
         if (rh_mem_committed(0x00870CFCu, 4)) {
-            user_ob = MR32(0x00870CFCu);
             MR32(0x00870CFCu) = 0;
+        }
+        if (rh_mem_committed(0x00876514u, 4)) {
+            MR32(0x00876514u) = 0;
         }
     }
 
@@ -1105,16 +1122,240 @@ static void hook_sub_005caad0(void) {
     }
 
     if (do_bypass) {
-        // Restore user settings immediately so in-game menus and player profile stay accurate
+        // Keep engine post-processing flags clamped to 0 so SPEED2.EXE never executes
+        // the heavy 3-pass ping-pong StretchRect resolve that causes the 40 FPS drop on mobile TBDR GPUs.
         if (rh_mem_committed(0x00870D00u, 4)) {
-            MR32(0x00870D00u) = user_contrast;
+            MR32(0x00870D00u) = 0;
         }
         if (rh_mem_committed(0x00870CFCu, 4)) {
-            MR32(0x00870CFCu) = user_ob;
+            MR32(0x00870CFCu) = 0;
         }
     }
 
     if (fn_bypass) fn_bypass(0);
+}
+
+/* =========================================================================
+ * GameCore Enhancements (nfsu2-web parity: HFR, AI Catchup, Audio & Particles)
+ * ========================================================================= */
+
+#define G_CAREER        0x00863470u
+#define CAREER_RACE     0x8730u
+#define DRV_PACE        0x770u            /* AI driver: M, the target speed's factor */
+#define DRV_VEHICLE     0x4u
+#define VEH_BOOST       0x468u            /* vehicle: max(M, 1), power and grip */
+
+static void catchup_apply(uint32_t drv) {
+    if (!rh_mem_committed(G_CAREER + CAREER_RACE, 4) || !MR32(G_CAREER + CAREER_RACE)) return;
+    if (!drv || !rh_mem_committed(drv + DRV_PACE, 4) || !rh_mem_committed(drv + DRV_VEHICLE, 4)) return;
+    uint32_t veh = MR32(drv + DRV_VEHICLE);
+    int car = (veh && rh_mem_committed(veh + VEH_BOOST, 4));
+    float m = MRF32(drv + DRV_PACE);
+    float b = car ? MRF32(veh + VEH_BOOST) : 1.0f;
+    // Normalize catchup: clamp AI pace factor and vehicle boost factor to 1.0 max
+    // prevents artificial rocket speed spikes when AI is behind player
+    if (m > 1.0f) {
+        MRF32(drv + DRV_PACE) = 1.0f;
+    }
+    if (car && b > 1.0f) {
+        MRF32(veh + VEH_BOOST) = 1.0f;
+    }
+}
+
+static void hook_sub_004172d0(void) {
+    uint32_t drv = (g_p_ecx && g_p_mem_base && *g_p_mem_base) ? *g_p_ecx : 0;
+    if (s_orig_4172d0) {
+        s_orig_4172d0();
+    }
+    if (drv) {
+        catchup_apply(drv);
+    }
+}
+
+#define A_CAP 0x007a572cu
+static void hook_sub_005ff490(void) {
+    float cap = (rh_mem_committed(A_CAP, 4)) ? MRF32(A_CAP) : 0.0f;
+    if (s_orig_5ff490) {
+        s_orig_5ff490();
+    }
+    // Restore frame rate cap request to prevent network/career races from locking to 30 FPS
+    if (rh_mem_committed(A_CAP, 4)) {
+        MRF32(A_CAP) = cap;
+    }
+}
+
+#define A_REALDT 0x00865198u
+static void hook_sub_00492e10(void) {
+    uint32_t esp = (g_p_esp && g_p_mem_base && *g_p_mem_base) ? *g_p_esp : 0;
+    uint32_t ecx = (g_p_ecx) ? *g_p_ecx : 0;
+    if (esp >= 0x10000u && rh_mem_committed(esp, 8) && ecx == 0x00835860u) {
+        if (MR32(esp) == 0x005d2c1cu) {
+            float k = MRF32(esp + 4u);
+            if (rh_mem_committed(A_REALDT, 4)) {
+                float dt = MRF32(A_REALDT);
+                if (dt > 0.0f && dt < k) {
+                    MRF32(esp + 4u) = dt;
+                }
+            }
+        }
+    }
+    if (s_orig_492e10) {
+        s_orig_492e10();
+    }
+}
+
+#define A_FRAMECNT   0x00870818u
+#define A_STREAK_FC  0x008a44ecu
+#define G_WORLD      0x008a4454u
+#define TR_CARS 16
+#define TR_HIST 24
+#define TR_GAP  0.1
+
+typedef struct {
+    uint32_t ring;
+    int n, head;
+    double t[TR_HIST];
+    uint8_t m[TR_HIST][64];
+    uint8_t p[TR_HIST][16];
+} TrailHist;
+
+static TrailHist g_tr[TR_CARS];
+static double g_tr_time = 0.0;
+
+static TrailHist *trail_of(uint32_t ring) {
+    int free_i = -1;
+    for (int i = 0; i < TR_CARS; i++) {
+        if (g_tr[i].ring == ring) return &g_tr[i];
+        if (!g_tr[i].ring && free_i < 0) free_i = i;
+    }
+    if (free_i < 0) free_i = (int)(ring >> 4) % TR_CARS;
+    memset(&g_tr[free_i], 0, sizeof(g_tr[free_i]));
+    g_tr[free_i].ring = ring;
+    return &g_tr[free_i];
+}
+
+static int trail_pick(const TrailHist *h, double t) {
+    for (int k = 0; k < h->n; k++) {
+        int i = (h->head - k + TR_HIST) % TR_HIST;
+        if (h->t[i] <= t + 1e-4) return i;
+    }
+    return -1;
+}
+
+static void hook_sub_0061ad80(void) {
+    if (!rh_mem_committed(A_FRAMECNT, 4) || !rh_mem_committed(A_STREAK_FC, 4) || !rh_mem_committed(G_WORLD, 4)) {
+        if (s_orig_61ad80) s_orig_61ad80();
+        return;
+    }
+    if (MR32(A_FRAMECNT) == MR32(A_STREAK_FC)) {
+        if (s_orig_61ad80) s_orig_61ad80();
+        return;
+    }
+    float dt = rh_mem_committed(A_REALDT, 4) ? MRF32(A_REALDT) : 0.0166667f;
+    g_tr_time += (dt > 0.0f && dt < 0.25f) ? dt : 0.0;
+    uint32_t rings[TR_CARS];
+    int idx0[TR_CARS], nc = 0;
+    uint32_t head = MR32(G_WORLD);
+    if (head && rh_mem_committed(head, 4)) {
+        for (uint32_t e = MR32(head); e && e != head && nc < TR_CARS && rh_mem_committed(e + 0x554, 4); e = MR32(e)) {
+            uint32_t r = MR32(e + 0x554);
+            if (!r || !rh_mem_committed(r + 0x2180, 4)) continue;
+            rings[nc] = r;
+            idx0[nc] = (int)MR32(r + 0x2180);
+            nc++;
+        }
+    }
+    if (s_orig_61ad80) {
+        s_orig_61ad80();
+    }
+    double back = 1.0 / 60.0;
+    for (int i = 0; i < nc; i++) {
+        uint32_t r = rings[i];
+        if (!rh_mem_committed(r + 0x2180, 4)) continue;
+        int idx = (int)MR32(r + 0x2180);
+        if (idx == idx0[i] || idx < 0 || idx > 2) continue;
+        TrailHist *h = trail_of(r);
+        if (h->n && (g_tr_time - h->t[h->head] > TR_GAP)) h->n = 0;
+        h->head = (h->head + 1) % TR_HIST;
+        if (h->n < TR_HIST) h->n++;
+        h->t[h->head] = g_tr_time;
+        if (rh_mem_committed(r + 0x2090 + (uint32_t)idx * 64u, 64)) {
+            memcpy(h->m[h->head], (void *)GPTR(r + 0x2090 + (uint32_t)idx * 64u), 64);
+        }
+        if (rh_mem_committed(r + 0x2150 + (uint32_t)idx * 16u, 16)) {
+            memcpy(h->p[h->head], (void *)GPTR(r + 0x2150 + (uint32_t)idx * 16u), 16);
+        }
+        int prev = (idx + 2) % 3, old = (idx + 1) % 3;
+        int a = trail_pick(h, g_tr_time - back);
+        if (a < 0) continue;
+        int b = trail_pick(h, h->t[a] - back);
+        if (rh_mem_committed(r + 0x2090 + (uint32_t)prev * 64u, 64)) {
+            memcpy((void *)GPTR(r + 0x2090 + (uint32_t)prev * 64u), h->m[a], 64);
+        }
+        if (rh_mem_committed(r + 0x2150 + (uint32_t)prev * 16u, 16)) {
+            memcpy((void *)GPTR(r + 0x2150 + (uint32_t)prev * 16u), h->p[a], 16);
+        }
+        if (b >= 0) {
+            if (rh_mem_committed(r + 0x2090 + (uint32_t)old * 64u, 64)) {
+                memcpy((void *)GPTR(r + 0x2090 + (uint32_t)old * 64u), h->m[b], 64);
+            }
+            if (rh_mem_committed(r + 0x2150 + (uint32_t)old * 16u, 16)) {
+                memcpy((void *)GPTR(r + 0x2150 + (uint32_t)old * 16u), h->p[b], 16);
+            }
+        }
+    }
+}
+
+#define A_SND_ON     0x00787a74u
+#define A_SND_PAUSE  0x00787a78u
+static uint32_t g_au_this = 0;
+static double   g_au_carry = 0.0;
+
+static void hook_sub_00483b40(void) {
+    uint32_t self = (g_p_ecx) ? *g_p_ecx : 0;
+    uint32_t esp = (g_p_esp && g_p_mem_base && *g_p_mem_base) ? *g_p_esp : 0;
+    float dt = (esp >= 0x10000u && rh_mem_committed(esp + 4u, 4)) ? MRF32(esp + 4u) : 0.0f;
+    if (self != g_au_this) {
+        g_au_this = self;
+        g_au_carry = 0.0;
+    }
+    int ok = self && rh_mem_committed(self + 0xa7, 1) &&
+             rh_mem_committed(A_SND_ON, 4) && MR32(A_SND_ON) &&
+             rh_mem_committed(A_SND_PAUSE, 4) && !MR32(A_SND_PAUSE);
+    if (!ok || dt <= 0.0f) {
+        if (dt > 0.0f) g_au_carry = 0.0;
+        if (s_orig_483b40) s_orig_483b40();
+        return;
+    }
+    int active = rh_mem_committed(self + 0x13, 1) ? !MR8(self + 0x13) : 1;
+    uint32_t stamp = rh_mem_committed(self + 0xa4, 4) ? MR32(self + 0xa4) : 0;
+    double d2 = dt;
+    if (active) {
+        d2 = (double)dt + g_au_carry;
+        if (d2 > 0.25) d2 = 0.25;
+        MRF32(esp + 4u) = (float)d2;
+    }
+    if (s_orig_483b40) {
+        s_orig_483b40();
+    }
+    if (rh_mem_committed(self + 0xa4, 4) && MR32(self + 0xa4) != stamp) {
+        g_au_carry = 0.0;
+    } else {
+        g_au_carry = active ? d2 : 0.0;
+    }
+}
+
+#define A_FE_SPIN     0x007a667cu
+static void fe_spinners_tick(void) {
+    if (!rh_mem_committed(A_FE_SPIN, 4) || !rh_mem_committed(A_REALDT, 4)) return;
+    static float s_van_spin = -1.0f;
+    if (s_van_spin < 0.0f) s_van_spin = MRF32(A_FE_SPIN);
+    float dt = MRF32(A_REALDT);
+    if (dt > 0.0f && dt < 0.25f) {
+        MRF32(A_FE_SPIN) = s_van_spin * 60.0f * dt;
+    } else {
+        MRF32(A_FE_SPIN) = s_van_spin;
+    }
 }
 
 static void hook_recomp_hook(uint32_t va) {
@@ -1130,8 +1371,8 @@ static void hook_recomp_hook(uint32_t va) {
 
         float dd = get_configured_draw_distance();
         if (dd >= 30.0f && (view >= 1u && view <= 5u)) {
-            float max_far = (view == 3u || view == 4u) ? (dd * 0.75f) : dd;
-            if ((view == 3u || view == 4u) && max_far < 35.0f) max_far = 35.0f;
+            float max_far = (view == 4u) ? 70.0f : ((view == 3u) ? (dd * 0.75f) : dd);
+            if (view == 3u && max_far < 35.0f) max_far = 35.0f;
             uint32_t esp = (g_p_esp && *g_p_esp) ? *g_p_esp : 0;
             if (esp >= 0x10000u && rh_mem_committed(esp + 0x0Cu, 4)) {
                 if (MRF32(esp + 0x0Cu) > max_far) {
@@ -1242,10 +1483,13 @@ static void roam_android_install_hooks(void) {
     // Also update k_functions dispatch table
     uintptr_t k_4a = lib_base + 0x9778160;
     if (*(uint32_t *)k_4a == 0x004a5d90) {
+        if (!s_orig_4a5d90) {
+            s_orig_4a5d90 = *(void **)(k_4a + 8);
+        }
         uintptr_t page = k_4a & ~((uintptr_t)page_sz - 1);
         mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
         *(void **)(k_4a + 8) = (void *)hook_sub_004a5d90;
-        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x004a5d90]");
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x004a5d90] (orig: %p)", s_orig_4a5d90);
     }
 
     uintptr_t k_5c = lib_base + 0x9793cd0;
@@ -1262,6 +1506,76 @@ static void roam_android_install_hooks(void) {
         mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
         *(void **)(k_radar + 8) = (void *)hook_sub_005caad0;
         __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x005caad0]");
+    }
+
+    // 1. sub_004172d0 (AI rubberbanding catchup normalization)
+    void *target_41 = g_p_recomp_lookup ? (void *)g_p_recomp_lookup(0x004172d0u) : NULL;
+    if (target_41) {
+        s_orig_4172d0 = (recomp_void_func_t)arm64_inline_hook(target_41, (void *)hook_sub_004172d0);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Hooked sub_004172d0 (AI catchup) at %p (orig: %p)", target_41, s_orig_4172d0);
+    }
+    uintptr_t k_41 = lib_base + 0x9768b90;
+    if (*(uint32_t *)k_41 == 0x004172d0) {
+        uintptr_t page = k_41 & ~((uintptr_t)page_sz - 1);
+        mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
+        *(void **)(k_41 + 8) = (void *)hook_sub_004172d0;
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x004172d0]");
+    }
+
+    // 2. sub_005ff490 (Online/LAN 30 FPS cap uncap)
+    void *target_5f = g_p_recomp_lookup ? (void *)g_p_recomp_lookup(0x005ff490u) : NULL;
+    if (target_5f) {
+        s_orig_5ff490 = (recomp_void_func_t)arm64_inline_hook(target_5f, (void *)hook_sub_005ff490);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Hooked sub_005ff490 (online 30fps cap) at %p (orig: %p)", target_5f, s_orig_5ff490);
+    }
+    uintptr_t k_5f = lib_base + 0x97999b0;
+    if (*(uint32_t *)k_5f == 0x005ff490) {
+        uintptr_t page = k_5f & ~((uintptr_t)page_sz - 1);
+        mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
+        *(void **)(k_5f + 8) = (void *)hook_sub_005ff490;
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x005ff490]");
+    }
+
+    // 3. sub_00492e10 (Acid particle update dt scaling)
+    void *target_49 = g_p_recomp_lookup ? (void *)g_p_recomp_lookup(0x00492e10u) : NULL;
+    if (target_49) {
+        s_orig_492e10 = (recomp_void_func_t)arm64_inline_hook(target_49, (void *)hook_sub_00492e10);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Hooked sub_00492e10 (particles dt) at %p (orig: %p)", target_49, s_orig_492e10);
+    }
+    uintptr_t k_49 = lib_base + 0x9775a90;
+    if (*(uint32_t *)k_49 == 0x00492e10) {
+        uintptr_t page = k_49 & ~((uintptr_t)page_sz - 1);
+        mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
+        *(void **)(k_49 + 8) = (void *)hook_sub_00492e10;
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x00492e10]");
+    }
+
+    // 4. sub_0061ad80 (NOS streaking flares trail length)
+    void *target_61 = g_p_recomp_lookup ? (void *)g_p_recomp_lookup(0x0061ad80u) : NULL;
+    if (target_61) {
+        s_orig_61ad80 = (recomp_void_func_t)arm64_inline_hook(target_61, (void *)hook_sub_0061ad80);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Hooked sub_0061ad80 (NOS trail) at %p (orig: %p)", target_61, s_orig_61ad80);
+    }
+    uintptr_t k_61 = lib_base + 0x979b8d0;
+    if (*(uint32_t *)k_61 == 0x0061ad80) {
+        uintptr_t page = k_61 & ~((uintptr_t)page_sz - 1);
+        mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
+        *(void **)(k_61 + 8) = (void *)hook_sub_0061ad80;
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x0061ad80]");
+    }
+
+    // 5. sub_00483b40 (EAXSound::Update audio pitch carry)
+    void *target_48 = g_p_recomp_lookup ? (void *)g_p_recomp_lookup(0x00483b40u) : NULL;
+    if (target_48) {
+        s_orig_483b40 = (recomp_void_func_t)arm64_inline_hook(target_48, (void *)hook_sub_00483b40);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Hooked sub_00483b40 (EAX audio dt) at %p (orig: %p)", target_48, s_orig_483b40);
+    }
+    uintptr_t k_48 = lib_base + 0x9774540;
+    if (*(uint32_t *)k_48 == 0x00483b40) {
+        uintptr_t page = k_48 & ~((uintptr_t)page_sz - 1);
+        mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
+        *(void **)(k_48 + 8) = (void *)hook_sub_00483b40;
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x00483b40]");
     }
 
     // Patch GOT slot for recomp_hook so PLT jumps directly to our hook
@@ -1405,12 +1719,24 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
         nfs_bind_to_perf_cores();
     }
     g_frame_count++;
+    static uint64_t s_last_tick_ns = 0;
+    struct timespec ts_tick;
+    clock_gettime(CLOCK_MONOTONIC, &ts_tick);
+    uint64_t now_tick_ns = (uint64_t)ts_tick.tv_sec * 1000000000ULL + (uint64_t)ts_tick.tv_nsec;
+    if (s_last_tick_ns > 0 && now_tick_ns > s_last_tick_ns) {
+        uint64_t tick_dur_ns = now_tick_ns - s_last_tick_ns;
+        static void(*s_metrics_record_roam)(uint64_t) = NULL;
+        if (!s_metrics_record_roam) s_metrics_record_roam = (void(*)(uint64_t))dlsym(RTLD_DEFAULT, "nfs_metrics_record_frame");
+        if (s_metrics_record_roam) s_metrics_record_roam(tick_dur_ns);
+    }
+    s_last_tick_ns = now_tick_ns;
     hiddenraces_frame_tick();
     extraoptions_frame_tick();
     lobby_frame_tick();
     framerate_pacing_fix();
     resolution_frame_tick();
     look_camera_frame_tick();
+    fe_spinners_tick();
     static int s_gamepad_hooked_tick = 0;
     if (!s_gamepad_hooked_tick) {
         roam_apply_gamepad_layout(0);
