@@ -298,11 +298,6 @@ public final class LauncherActivity extends Activity {
         }
         long exeSize = exe ? new File(root, "SPEED2.EXE").length() : 0;
         boolean exeOk = exe && exeSize == EXPECTED_EXE_SIZE;
-        addCheck(exe && !exeOk ? getString(R.string.exe_wrong_version, exeSize) : "SPEED2.EXE", exeOk, true);
-        StringBuilder missing = new StringBuilder();
-        for (String folder : new String[] {"GLOBAL", "TRACKS", "CARS", "FRONTEND", "LANGUAGES"})
-            if (!(allowed && new File(root, folder).isDirectory())) missing.append(missing.length() == 0 ? "" : ", ").append(folder);
-        addCheck(missing.length() == 0 ? getString(R.string.game_folders) : getString(R.string.missing_folders, missing), missing.length() == 0, true);
         boolean ready = exeOk && !languages().isEmpty();
         filesReady = ready;
         status.setText(!allowed ? getString(R.string.status_allow_access)
