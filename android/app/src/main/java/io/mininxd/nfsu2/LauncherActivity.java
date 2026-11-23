@@ -15,6 +15,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
@@ -66,7 +67,7 @@ public final class LauncherActivity extends Activity {
     private LinearLayout optionsList;
     private TextView status;
     private Button play, access, downloadFiles, chooseLocation;
-    private Button btnPresetPerformance, btnPresetBalanced, btnPresetOriginal;
+    private Button btnPresetPerformance, btnPresetBalanced, btnPresetOriginal, btnPresetCustom;
     public static Context sAppContext = null;
     public static String sCustomGamePath = null;
     private boolean playAfterProbe, checkingUpdates, resumed;
@@ -258,7 +259,43 @@ public final class LauncherActivity extends Activity {
         playParams.topMargin = dp(8);
         left.addView(play, playParams);
 
-        access = actionButton(getString(R.string.allow_access), false);
+        // Presets: Low, High, Original
+        LinearLayout presetContainer = new LinearLayout(this);
+        presetContainer.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams pcParams = new LinearLayout.LayoutParams(-1, -2);
+        pcParams.topMargin = dp(6);
+        left.addView(presetContainer, pcParams);
+
+        TextView presetHeader = label("GRAPHICS PRESET", 11, TEXT_HINT, true);
+        presetHeader.setPadding(dp(2), 0, 0, dp(3));
+        presetContainer.addView(presetHeader);
+
+        LinearLayout presetRow = new LinearLayout(this);
+        presetRow.setOrientation(LinearLayout.HORIZONTAL);
+        presetRow.setGravity(Gravity.CENTER_VERTICAL);
+        presetContainer.addView(presetRow, new LinearLayout.LayoutParams(-1, dp(36)));
+
+        btnPresetPerformance = presetButton("Performance", "performance");
+        btnPresetBalanced = presetButton("Balanced", "balanced");
+        btnPresetOriginal = presetButton("Original", "original");
+        btnPresetCustom = presetButton("Custom", "custom");
+
+        LinearLayout.LayoutParams pBtnLp1 = new LinearLayout.LayoutParams(0, -1, 1f);
+        pBtnLp1.rightMargin = dp(4);
+        presetRow.addView(btnPresetPerformance, pBtnLp1);
+
+        LinearLayout.LayoutParams pBtnLp2 = new LinearLayout.LayoutParams(0, -1, 1f);
+        pBtnLp2.rightMargin = dp(4);
+        presetRow.addView(btnPresetBalanced, pBtnLp2);
+
+        LinearLayout.LayoutParams pBtnLp3 = new LinearLayout.LayoutParams(0, -1, 1f);
+        pBtnLp3.rightMargin = dp(4);
+        presetRow.addView(btnPresetOriginal, pBtnLp3);
+
+        LinearLayout.LayoutParams pBtnLp4 = new LinearLayout.LayoutParams(0, -1, 1f);
+        presetRow.addView(btnPresetCustom, pBtnLp4);
+
+                access = actionButton(getString(R.string.allow_access), false);
         access.setOnClickListener(view -> requestAccess());
         LinearLayout.LayoutParams accessParams = new LinearLayout.LayoutParams(-1, dp(46));
         accessParams.topMargin = dp(8);
@@ -289,21 +326,21 @@ public final class LauncherActivity extends Activity {
 
     private void refresh() {
         boolean allowed = allowed();
-        File root = gameRoot();
+        File root = gameRoot(this);
         if (allowed) ensureScriptsInstalled(root);
-        boolean exe = allowed && new File(root, "SPEED2.EXE").isFile();
+        boolean exe = allowed && isGameExecutable(root);
         if (allowed && !exe) {
             ensureGamefilesInstalled(root);
-            exe = new File(root, "SPEED2.EXE").isFile();
+            exe = isGameExecutable(root);
         }
-        long exeSize = exe ? new File(root, "SPEED2.EXE").length() : 0;
-        boolean exeOk = exe && exeSize == EXPECTED_EXE_SIZE;
-        boolean ready = exeOk && !languages().isEmpty();
-        filesReady = ready;
-        status.setText(!allowed ? getString(R.string.status_allow_access)
-                : ready ? getString(R.string.status_location, root.getAbsolutePath())
-                : exe && !exeOk ? getString(R.string.status_wrong_exe)
-                : getString(R.string.status_copy_files, gameRoot().getAbsolutePath()));
+        long exeSize = exe ? new File(root, "SPEED2.EXE").length() : 0;
+        boolean exeOk = exe && exeSize == EXPECTED_EXE_SIZE;
+        boolean ready = exeOk && !languages().isEmpty();
+        filesReady = ready;
+        status.setText(!allowed ? getString(R.string.status_allow_access)
+                : ready ? getString(R.string.status_location, root.getAbsolutePath())
+                : exe && !exeOk ? getString(R.string.status_wrong_exe)
+                : getString(R.string.status_copy_files, root.getAbsolutePath()));
         play.setEnabled(ready);
         play.setAlpha(ready ? 1f : .45f);
         access.setVisibility(allowed ? View.GONE : View.VISIBLE);
@@ -332,7 +369,7 @@ public final class LauncherActivity extends Activity {
     }
 
     private void ensureGamefilesInstalled(File root) {
-        if (!allowed() || new File(root, "SPEED2.EXE").isFile()) return;
+        if (!allowed() || isGameExecutable(root)) return;
         try {
             String[] list = getAssets().list("gamefiles");
             if (list != null && list.length > 0) {
@@ -526,10 +563,10 @@ public final class LauncherActivity extends Activity {
         GpuDrivers.Driver driver = GpuDrivers.selected(this);
         // Custom drivers (libadrenotools) exist only in the 64-bit build.
         if (android.os.Process.is64Bit())
-            optionsList.addView(optionRow(getString(R.string.opt_vulkan_driver), driver == null ? getString(R.string.system_default) : driver.name, this::chooseDriver));
-        optionsList.addView(optionRow(getString(R.string.opt_check_driver), getString(R.string.opt_check_driver_sub), () -> probeDriver(false)));
-        optionsList.addView(optionRow(getString(R.string.opt_storage), storageSummary(), this::chooseStorage));
-        optionsList.addView(optionRow(getString(R.string.opt_language), languageLabel(), this::chooseLanguage));
+            optionsList.addView(optionRow(getString(R.string.opt_vulkan_driver), driver == null ? getString(R.string.system_default) : driver.name, this::chooseDriver));
+        optionsList.addView(optionRow(getString(R.string.opt_check_driver), getString(R.string.opt_check_driver_sub), () -> probeDriver(false)));
+        optionsList.addView(optionRow(getString(R.string.opt_storage), storageSummary(), this::chooseStorage));
+        optionsList.addView(optionRow(getString(R.string.opt_language), languageLabel(), this::chooseLanguage));
         for (GameOptions.Option option : GameOptions.ALL)
             optionsList.addView(optionRow(option.title(this), option.label(this, GameOptions.get(this, option.key)), () -> chooseOption(option)));
         // Hidden for clean release (Extra Options enabled by default):
@@ -562,21 +599,21 @@ public final class LauncherActivity extends Activity {
 
     private List<String[]> languages() {
         List<String[]> found = new ArrayList<>();
-        File root = gameRoot();
+        File root = gameRoot(this);
+        if (root == null || !root.isDirectory()) return found;
+        File langDir = findSubDir(root, "LANGUAGES");
+        File langPacks = findSubDir(root, "LANGPACKS");
         for (String[] language : LANGUAGES) {
             String code = language[2];
             String codeLower = code.toLowerCase(Locale.ROOT);
             String nameLower = language[1].toLowerCase(Locale.ROOT);
-            if (new File(root, "LANGUAGES/" + code + ".bin").isFile()
-                    || new File(root, "LANGUAGES/" + codeLower + ".bin").isFile()
-                    || new File(root, "LANGPACKS/" + codeLower).isDirectory()
-                    || new File(root, "LANGPACKS/" + nameLower).isDirectory()
-                    || new File(root, "LANGPACKS/" + code + ".bin").isFile()
-                    || ("Spanish".equalsIgnoreCase(language[1]) && (
-                        new File(root, "LANGUAGES/Spanish.bin").isFile()
-                        || new File(root, "LANGUAGES/spanish.bin").isFile()
-                        || new File(root, "LANGUAGES/Espanol.bin").isFile()
-                        || new File(root, "LANGUAGES/espanol.bin").isFile()
+            if ((langDir != null && (findSubFile(langDir, code + ".bin") != null || findSubFile(langDir, codeLower + ".bin") != null))
+                    || (langPacks != null && (findSubDir(langPacks, codeLower) != null || findSubDir(langPacks, nameLower) != null || findSubFile(langPacks, code + ".bin") != null))
+                    || ("Spanish".equalsIgnoreCase(language[1]) && langDir != null && (
+                        findSubFile(langDir, "Spanish.bin") != null
+                        || findSubFile(langDir, "spanish.bin") != null
+                        || findSubFile(langDir, "Espanol.bin") != null
+                        || findSubFile(langDir, "espanol.bin") != null
                     ))) {
                 found.add(language);
             }
@@ -629,8 +666,7 @@ public final class LauncherActivity extends Activity {
                     if (GameOptions.WIDESCREEN.equals(option.key) || GameOptions.MINIMAP.equals(option.key)) {
                         GameOptions.applyWidescreenPatchFile(this);
                     }
-                    GameOptions.prefs(this).edit().putString("active_preset", "custom").apply();
-                    updatePresetButtons("custom");
+                    saveCustomPreset();
                     dialog.dismiss(); refreshOptions();
                 }).setNegativeButton(getString(R.string.cancel), null).show();
     }
@@ -943,7 +979,8 @@ public final class LauncherActivity extends Activity {
             } catch (Throwable ignored) {}
             String path = getPathFromTreeUri(treeUri);
             if (path != null) {
-                File dir = new File(path);
+                File dir = resolveCustomPath(path);
+                if (dir == null) dir = new File(path);
                 setCustomGameRoot(dir);
                 refresh();
             } else {
@@ -1134,6 +1171,7 @@ public final class LauncherActivity extends Activity {
         boolean logsEnabled = !"off".equals(GameOptions.get(this, GameOptions.DISPLAY_LOGS));
         if (GameOptions.usesWidescreenPatch(this)) GameOptions.syncWidescreenHudDat(this, logsEnabled);
         startActivity(new Intent(this, GameActivity.class)
+                .putExtra("gameRoot", gameRoot(this).getAbsolutePath())
                 .putExtra("language", GameOptions.language(this))
                 .putExtra("renderWidth", size[0]).putExtra("renderHeight", size[1])
                 .putExtra("resolutionPercent", GameOptions.get(this, GameOptions.RESOLUTION))
@@ -1165,7 +1203,8 @@ public final class LauncherActivity extends Activity {
         Button b = new Button(this);
         b.setText(title);
         b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        b.setPadding(dp(2), 0, dp(2), 0);
         b.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC));
         b.setOnClickListener(v -> applyPreset(presetId));
         b.setStateListAnimator(null);
@@ -1173,10 +1212,11 @@ public final class LauncherActivity extends Activity {
     }
 
     private void updatePresetButtons(String activePreset) {
-        if (btnPresetPerformance == null || btnPresetBalanced == null || btnPresetOriginal == null) return;
+        if (btnPresetPerformance == null || btnPresetBalanced == null || btnPresetOriginal == null || btnPresetCustom == null) return;
         setPresetButtonState(btnPresetPerformance, "performance".equalsIgnoreCase(activePreset));
         setPresetButtonState(btnPresetBalanced, "balanced".equalsIgnoreCase(activePreset));
         setPresetButtonState(btnPresetOriginal, "original".equalsIgnoreCase(activePreset));
+        setPresetButtonState(btnPresetCustom, "custom".equalsIgnoreCase(activePreset));
     }
 
     private void setPresetButtonState(Button b, boolean active) {
@@ -1192,8 +1232,22 @@ public final class LauncherActivity extends Activity {
         b.setBackground(bg);
     }
 
+    private void saveCustomPreset() {
+        android.content.SharedPreferences sp = GameOptions.prefs(this);
+        sp.edit()
+                .putString("custom_resolution", GameOptions.get(this, GameOptions.RESOLUTION))
+                .putString("custom_draw_distance", GameOptions.get(this, GameOptions.DRAW_DISTANCE))
+                .putString("custom_graphics_backend", GameOptions.get(this, GameOptions.GRAPHICS_BACKEND))
+                .putString("custom_fps", GameOptions.get(this, GameOptions.FPS))
+                .putBoolean("has_custom_preset", true)
+                .putString("active_preset", "custom")
+                .apply();
+        updatePresetButtons("custom");
+    }
+
     private void applyPreset(String preset) {
-        android.content.SharedPreferences.Editor ed = GameOptions.prefs(this).edit();
+        android.content.SharedPreferences sp = GameOptions.prefs(this);
+        android.content.SharedPreferences.Editor ed = sp.edit();
         ed.putString("active_preset", preset);
         if ("performance".equalsIgnoreCase(preset)) {
             ed.putString(GameOptions.DRAW_DISTANCE, "performance");
@@ -1204,14 +1258,43 @@ public final class LauncherActivity extends Activity {
         } else if ("original".equalsIgnoreCase(preset)) {
             ed.putString(GameOptions.DRAW_DISTANCE, "original");
             ed.putString(GameOptions.RESOLUTION, "100");
+        } else if ("custom".equalsIgnoreCase(preset)) {
+            if (sp.getBoolean("has_custom_preset", false)) {
+                String cRes = sp.getString("custom_resolution", null);
+                if (cRes != null) ed.putString(GameOptions.RESOLUTION, cRes);
+                String cDraw = sp.getString("custom_draw_distance", null);
+                if (cDraw != null) ed.putString(GameOptions.DRAW_DISTANCE, cDraw);
+                String cBackend = sp.getString("custom_graphics_backend", null);
+                if (cBackend != null) ed.putString(GameOptions.GRAPHICS_BACKEND, cBackend);
+                String cFps = sp.getString("custom_fps", null);
+                if (cFps != null) ed.putString(GameOptions.FPS, cFps);
+            } else {
+                ed.putString("custom_resolution", GameOptions.get(this, GameOptions.RESOLUTION));
+                ed.putString("custom_draw_distance", GameOptions.get(this, GameOptions.DRAW_DISTANCE));
+                ed.putString("custom_graphics_backend", GameOptions.get(this, GameOptions.GRAPHICS_BACKEND));
+                ed.putString("custom_fps", GameOptions.get(this, GameOptions.FPS));
+                ed.putBoolean("has_custom_preset", true);
+            }
         }
         ed.apply();
         updatePresetButtons(preset);
         refreshOptions();
     }
 
+    private String locationLabel() {
+        File root = gameRoot(this);
+        if (root == null) return "Default";
+        String path = root.getAbsolutePath();
+        String ext = Environment.getExternalStorageDirectory().getAbsolutePath();
+        if (path.startsWith(ext)) {
+            String rel = path.substring(ext.length()).replaceAll("^/+", "");
+            return rel.isEmpty() ? "/sdcard" : rel;
+        }
+        return path;
+    }
+
     private void showChooseLocationDialog() {
-        File current = gameRoot();
+        File current = gameRoot(this);
         android.widget.EditText input = new android.widget.EditText(this);
         input.setSingleLine(true);
         input.setText(current.getAbsolutePath());
@@ -1238,7 +1321,8 @@ public final class LauncherActivity extends Activity {
                 .setPositiveButton("Save", (d, which) -> {
                     String p = input.getText().toString().trim();
                     if (!p.isEmpty()) {
-                        File f = new File(p);
+                        File f = resolveCustomPath(p);
+                        if (f == null) f = new File(p);
                         setCustomGameRoot(f);
                         refresh();
                     }
@@ -1269,14 +1353,170 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    public static boolean isGameExecutable(File root) {
+        if (root == null || !root.isDirectory()) return false;
+        return new File(root, "SPEED2.EXE").isFile()
+                || new File(root, "speed2.exe").isFile()
+                || new File(root, "Speed2.exe").isFile()
+                || findSubFile(root, "speed2.exe") != null;
+    }
+
+    public static File findGameRootInDir(File dir) {
+        if (dir == null) return null;
+        if (isGameExecutable(dir)) return dir;
+
+        for (String subName : new String[]{"nfsu2", "NFSU2", "NFS Underground 2", "Need for Speed Underground 2", "Need For Speed Underground 2"}) {
+            File sub = new File(dir, subName);
+            if (isGameExecutable(sub)) return sub;
+        }
+
+        if (dir.isDirectory()) {
+            File[] children = dir.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    if (child.isDirectory() && isGameExecutable(child)) {
+                        return child;
+                    }
+                }
+            }
+        }
+        return dir;
+    }
+
+    private static File findSubDir(File parent, String name) {
+        if (parent == null || !parent.isDirectory()) return null;
+        File direct = new File(parent, name);
+        if (direct.isDirectory()) return direct;
+        File[] files = parent.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory() && f.getName().equalsIgnoreCase(name)) return f;
+            }
+        }
+        return null;
+    }
+
+    private static File findSubFile(File parent, String name) {
+        if (parent == null || !parent.isDirectory()) return null;
+        File direct = new File(parent, name);
+        if (direct.isFile()) return direct;
+        File[] files = parent.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isFile() && f.getName().equalsIgnoreCase(name)) return f;
+            }
+        }
+        return null;
+    }
+
+    private static File resolveCaseInsensitive(File base, String relPath) {
+        if (base == null || !base.isDirectory() || relPath == null) return null;
+        String[] parts = relPath.split("/+");
+        File current = base;
+        for (String part : parts) {
+            if (part.isEmpty() || ".".equals(part)) continue;
+            if ("..".equals(part)) {
+                current = current.getParentFile();
+                if (current == null) return null;
+                continue;
+            }
+            File direct = new File(current, part);
+            if (direct.exists()) {
+                current = direct;
+                continue;
+            }
+            File[] files = current.listFiles();
+            if (files == null) return null;
+            File found = null;
+            for (File f : files) {
+                if (f.getName().equalsIgnoreCase(part)) {
+                    found = f;
+                    break;
+                }
+            }
+            if (found == null) {
+                if ("download".equalsIgnoreCase(part)) {
+                    for (File f : files) {
+                        if ("downloads".equalsIgnoreCase(f.getName())) { found = f; break; }
+                    }
+                } else if ("downloads".equalsIgnoreCase(part)) {
+                    for (File f : files) {
+                        if ("download".equalsIgnoreCase(f.getName())) { found = f; break; }
+                    }
+                }
+            }
+            if (found == null) return null;
+            current = found;
+        }
+        return current;
+    }
+
+    public static File resolveCustomPath(String rawPath) {
+        if (rawPath == null) return null;
+        String p = rawPath.trim();
+        if (p.isEmpty()) return null;
+
+        File direct = new File(p);
+        if (direct.exists() && direct.isDirectory()) {
+            return findGameRootInDir(direct);
+        }
+
+        File ext = Environment.getExternalStorageDirectory();
+
+        if (p.startsWith("/sdcard/") || p.equals("/sdcard")) {
+            String rel = p.length() > 7 ? p.substring(7).replaceAll("^/+", "") : "";
+            File sub = new File(ext, rel);
+            if (sub.exists() && sub.isDirectory()) return findGameRootInDir(sub);
+            File match = resolveCaseInsensitive(ext, rel);
+            if (match != null && match.isDirectory()) return findGameRootInDir(match);
+        }
+
+        String emulatedPrefix = "/storage/emulated/0";
+        if (p.startsWith(emulatedPrefix)) {
+            String rel = p.substring(emulatedPrefix.length()).replaceAll("^/+", "");
+            File sub = new File(ext, rel);
+            if (sub.exists() && sub.isDirectory()) return findGameRootInDir(sub);
+            File match = resolveCaseInsensitive(ext, rel);
+            if (match != null && match.isDirectory()) return findGameRootInDir(match);
+        }
+
+        String stripped = p.replaceAll("^/+", "");
+        File underExt = new File(ext, stripped);
+        if (underExt.exists() && underExt.isDirectory()) {
+            return findGameRootInDir(underExt);
+        }
+
+        File match = resolveCaseInsensitive(ext, stripped);
+        if (match != null && match.isDirectory()) {
+            return findGameRootInDir(match);
+        }
+
+        if (stripped.toLowerCase(Locale.ROOT).startsWith("download/") || stripped.toLowerCase(Locale.ROOT).startsWith("downloads/")) {
+            int slash = stripped.indexOf('/');
+            String subRel = slash >= 0 ? stripped.substring(slash + 1) : "";
+            for (String dlName : new String[]{"Download", "download", "Downloads", "downloads"}) {
+                File dlBase = new File(ext, dlName);
+                if (dlBase.isDirectory()) {
+                    File subFile = new File(dlBase, subRel);
+                    if (subFile.exists() && subFile.isDirectory()) return findGameRootInDir(subFile);
+                    File dlMatch = resolveCaseInsensitive(dlBase, subRel);
+                    if (dlMatch != null && dlMatch.isDirectory()) return findGameRootInDir(dlMatch);
+                }
+            }
+        }
+
+        if (!p.startsWith("/storage/")) {
+            return underExt;
+        }
+        return direct;
+    }
+
     private void setCustomGameRoot(File dir) {
         if (dir == null) return;
-        if (!dir.exists()) dir.mkdirs();
-        File actual = dir;
-        if (!new File(actual, "SPEED2.EXE").isFile() && new File(actual, "NFSU2/SPEED2.EXE").isFile()) {
-            actual = new File(actual, "NFSU2");
-        } else if (!new File(actual, "SPEED2.EXE").isFile() && new File(actual, "nfsu2/SPEED2.EXE").isFile()) {
-            actual = new File(actual, "nfsu2");
+        File actual = findGameRootInDir(dir);
+        if (actual == null) actual = dir;
+        if (!actual.exists()) {
+            try { actual.mkdirs(); } catch (Throwable ignored) {}
         }
         GameOptions.prefs(this).edit().putString(GameOptions.CUSTOM_GAME_DIR, actual.getAbsolutePath()).apply();
         sCustomGamePath = actual.getAbsolutePath();
@@ -1288,29 +1528,73 @@ public final class LauncherActivity extends Activity {
         try {
             String docId = null;
             if (Build.VERSION.SDK_INT >= 21) {
-                docId = android.provider.DocumentsContract.getTreeDocumentId(uri);
+                try {
+                    docId = DocumentsContract.getTreeDocumentId(uri);
+                } catch (Throwable ignored) {}
+            }
+            if (docId == null) {
+                try {
+                    docId = DocumentsContract.getDocumentId(uri);
+                } catch (Throwable ignored) {}
             }
             if (docId == null) docId = uri.getPath();
-            if (docId != null) {
-                int colon = docId.indexOf(':');
-                String type = colon >= 0 ? docId.substring(0, colon) : docId;
-                String rel = colon >= 0 ? docId.substring(colon + 1) : "";
-                if ("primary".equalsIgnoreCase(type) || type.endsWith("primary")) {
-                    File ext = Environment.getExternalStorageDirectory();
-                    return rel.isEmpty() ? ext.getAbsolutePath() : new File(ext, rel).getAbsolutePath();
-                } else if (type.startsWith("/tree/")) {
-                    String sub = type.substring("/tree/".length());
-                    int subColon = sub.indexOf(':');
-                    if (subColon >= 0 && "primary".equalsIgnoreCase(sub.substring(0, subColon))) {
-                        File ext = Environment.getExternalStorageDirectory();
-                        String r = sub.substring(subColon + 1);
-                        return r.isEmpty() ? ext.getAbsolutePath() : new File(ext, r).getAbsolutePath();
-                    }
+            if (docId == null) return null;
+
+            try {
+                docId = java.net.URLDecoder.decode(docId, "UTF-8");
+            } catch (Throwable ignored) {}
+
+            if (docId.startsWith("raw:")) {
+                String raw = docId.substring(4);
+                if (new File(raw).exists()) return raw;
+                File resolved = resolveCustomPath(raw);
+                if (resolved != null && resolved.exists()) return resolved.getAbsolutePath();
+            }
+
+            String cleanedDocId = docId;
+            if (cleanedDocId.startsWith("/tree/")) cleanedDocId = cleanedDocId.substring(6);
+            else if (cleanedDocId.startsWith("tree/")) cleanedDocId = cleanedDocId.substring(5);
+            if (cleanedDocId.startsWith("/document/")) cleanedDocId = cleanedDocId.substring(10);
+            else if (cleanedDocId.startsWith("document/")) cleanedDocId = cleanedDocId.substring(9);
+
+            int colon = cleanedDocId.indexOf(':');
+            String type = colon >= 0 ? cleanedDocId.substring(0, colon) : cleanedDocId;
+            String rel = colon >= 0 ? cleanedDocId.substring(colon + 1) : "";
+
+            File ext = Environment.getExternalStorageDirectory();
+
+            if ("primary".equalsIgnoreCase(type) || type.toLowerCase(Locale.ROOT).endsWith("primary")) {
+                File target = rel.isEmpty() ? ext : new File(ext, rel);
+                if (target.exists()) return target.getAbsolutePath();
+                File resolved = resolveCustomPath(rel);
+                if (resolved != null && resolved.exists()) return resolved.getAbsolutePath();
+                return target.getAbsolutePath();
+            }
+
+            if ("downloads".equalsIgnoreCase(type) || "download".equalsIgnoreCase(type) || "msf".equalsIgnoreCase(type)) {
+                File dlDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                if (rel.isEmpty() || "msf".equalsIgnoreCase(type)) {
+                    return dlDir.getAbsolutePath();
                 }
-                File extDir = new File("/storage/" + type + (rel.isEmpty() ? "" : "/" + rel));
-                if (extDir.exists() || extDir.isDirectory()) {
-                    return extDir.getAbsolutePath();
-                }
+                File target = new File(dlDir, rel);
+                if (target.exists()) return target.getAbsolutePath();
+                File resolved = resolveCaseInsensitive(dlDir, rel);
+                if (resolved != null && resolved.exists()) return resolved.getAbsolutePath();
+                return target.getAbsolutePath();
+            }
+
+            File extDir = new File("/storage/" + type + (rel.isEmpty() ? "" : "/" + rel));
+            if (extDir.exists() || extDir.isDirectory()) {
+                return extDir.getAbsolutePath();
+            }
+            File mntDir = new File("/mnt/media_rw/" + type + (rel.isEmpty() ? "" : "/" + rel));
+            if (mntDir.exists() || mntDir.isDirectory()) {
+                return mntDir.getAbsolutePath();
+            }
+
+            File fallback = resolveCustomPath(rel.isEmpty() ? cleanedDocId : rel);
+            if (fallback != null && fallback.exists()) {
+                return fallback.getAbsolutePath();
             }
         } catch (Throwable t) {
             android.util.Log.w("NFSU2", "Failed to resolve tree uri: " + uri, t);
@@ -1320,13 +1604,53 @@ public final class LauncherActivity extends Activity {
 
     // ---- Storage ---------------------------------------------------------------------------------------
 
+    public static File gameRoot(Context context) {
+        if (context != null) {
+            String custom = GameOptions.prefs(context).getString(GameOptions.CUSTOM_GAME_DIR, null);
+            if (custom != null && !custom.trim().isEmpty()) {
+                File resolved = resolveCustomPath(custom.trim());
+                if (resolved != null && resolved.isDirectory()) return resolved;
+                File f = new File(custom.trim());
+                if (f.isDirectory()) return f;
+            }
+        }
+        if (sCustomGamePath != null && !sCustomGamePath.trim().isEmpty()) {
+            File resolved = resolveCustomPath(sCustomGamePath.trim());
+            if (resolved != null && resolved.isDirectory()) return resolved;
+            File f = new File(sCustomGamePath.trim());
+            if (f.isDirectory()) return f;
+        }
+
+        File ext = Environment.getExternalStorageDirectory();
+        File[] candidates = new File[] {
+            new File(ext, "nfsu2"),
+            new File(ext, "NFSU2"),
+            new File(ext, "Download/nfsu2"),
+            new File(ext, "Download/NFSU2"),
+            new File(ext, "Downloads/nfsu2"),
+            new File(ext, "Downloads/NFSU2")
+        };
+
+        for (File candidate : candidates) {
+            if (isGameExecutable(candidate)) return candidate;
+        }
+
+        for (File candidate : candidates) {
+            if (candidate.isDirectory()) {
+                String[] list = candidate.list();
+                if (list != null && list.length > 0) return candidate;
+            }
+        }
+
+        if (new File(ext, "nfsu2").isDirectory()) return new File(ext, "nfsu2");
+        if (new File(ext, "NFSU2").isDirectory()) return new File(ext, "NFSU2");
+
+        return new File(ext, "nfsu2");
+    }
+
+    /** Context-free variant for callers without one (logs, diagnostics, native tuning). */
     public static File gameRoot() {
-        File custom = GameOptions.customGameDir();
-        if (custom != null) return custom;
-        File storage = Environment.getExternalStorageDirectory();
-        File f = new File(storage, "NFSU2");
-        if (f.isDirectory()) return f;
-        return new File(storage, "nfsu2");
+        return gameRoot(null);
     }
 
     /** Value shown on the settings row. */

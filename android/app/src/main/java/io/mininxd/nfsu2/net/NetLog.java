@@ -9,6 +9,8 @@ import android.os.Environment;
 import android.provider.MediaStore;
 import android.util.Log;
 
+import io.mininxd.nfsu2.LauncherActivity;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -177,10 +179,19 @@ public final class NetLog {
                 writer.flush();
             }
 
-            // Sync copy to sdcard /sdcard/NFSU2/net_log.txt if available
+            // Sync copy to active game root or existing sdcard folder if available (never create directory)
             try {
-                File sdcardDir = new File(Environment.getExternalStorageDirectory(), "NFSU2");
-                if (sdcardDir.isDirectory() || sdcardDir.mkdirs()) {
+                File root = LauncherActivity.gameRoot();
+                File sdcardDir = (root != null && root.isDirectory()) ? root : null;
+                if (sdcardDir == null) {
+                    File lower = new File(Environment.getExternalStorageDirectory(), "nfsu2");
+                    if (lower.isDirectory()) sdcardDir = lower;
+                    else {
+                        File upper = new File(Environment.getExternalStorageDirectory(), "NFSU2");
+                        if (upper.isDirectory()) sdcardDir = upper;
+                    }
+                }
+                if (sdcardDir != null && sdcardDir.isDirectory()) {
                     File sdcardFile = new File(sdcardDir, "net_log.txt");
                     try (FileWriter writer = new FileWriter(sdcardFile, true)) {
                         writer.write(entry);
@@ -338,17 +349,27 @@ public final class NetLog {
             }
         } catch (Throwable ignored) {}
 
-        // 3. Try /sdcard/NFSU2/
+        // 3. Try active game root or existing sdcard folder (never create directory)
         try {
-            File sdcardDir = new File(Environment.getExternalStorageDirectory(), "NFSU2");
-            if (!sdcardDir.isDirectory()) sdcardDir.mkdirs();
-            File dest = new File(sdcardDir, "NFSU2-network.log");
-            try (InputStream in = new FileInputStream(source);
-                 FileOutputStream out = new FileOutputStream(dest)) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    out.write(buf, 0, n);
+            File root = LauncherActivity.gameRoot();
+            File sdcardDir = (root != null && root.isDirectory()) ? root : null;
+            if (sdcardDir == null) {
+                File lower = new File(Environment.getExternalStorageDirectory(), "nfsu2");
+                if (lower.isDirectory()) sdcardDir = lower;
+                else {
+                    File upper = new File(Environment.getExternalStorageDirectory(), "NFSU2");
+                    if (upper.isDirectory()) sdcardDir = upper;
+                }
+            }
+            if (sdcardDir != null && sdcardDir.isDirectory()) {
+                File dest = new File(sdcardDir, "NFSU2-network.log");
+                try (InputStream in = new FileInputStream(source);
+                     FileOutputStream out = new FileOutputStream(dest)) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                    }
                 }
             }
         } catch (Throwable ignored) {}
