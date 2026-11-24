@@ -43,7 +43,8 @@ pub fn tune_current_thread(role: ThreadRole, name: Option<&str>) {
 
     let (mask, nice) = match role {
         ThreadRole::RenderMain => {
-            // Main rendering thread: pin to Big/Performance cores with maximum interactive priority
+            // Main rendering thread: all performance cores (Prime + Mid clusters)
+            // with maximum interactive priority (-20)
             let m = if cluster.perf_cores_mask != 0 {
                 cluster.perf_cores_mask
             } else {

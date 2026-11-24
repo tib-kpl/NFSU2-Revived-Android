@@ -206,12 +206,12 @@ void yieldGuestMachine(unsigned milliseconds=0,std::chrono::steady_clock::time_p
         auto now = std::chrono::steady_clock::now();
         if (deadline > now) {
             auto remaining = deadline - now;
-            // Hybrid precision pacing: if remaining > 2.5ms, sleep for (remaining - 1.5ms)
-            // so background workers can run, then active-spin the final 1.5ms using ARM yield.
-            // This prevents kernel sleep overshoots and stops Linux schedutil/PowerHAL
-            // from downclocking CPU/GPU cores into 30% low-frequency idle states!
-            if (remaining > std::chrono::microseconds(2500)) {
-                std::this_thread::sleep_for(remaining - std::chrono::microseconds(1500));
+            // High-throughput gaming pacing: only sleep if remaining is substantial (> 6ms).
+            // For smaller remaining intervals (<= 6ms), active spin-yield with ARM yield.
+            // This prevents kernel sleep overshoots (which drop FPS from 60 down to 54)
+            // and forces the Linux kernel CPU frequency governor to maintain peak CPU clocks!
+            if (remaining > std::chrono::microseconds(8000)) {
+                std::this_thread::sleep_for(remaining - std::chrono::microseconds(4000));
             }
             while (std::chrono::steady_clock::now() < deadline) {
 #if defined(__aarch64__)
@@ -360,15 +360,20 @@ void d3dDispatch(){
         static bool s_adpf_inited=false;
         if(!s_adpf_inited){
             s_adpf_inited=true;
-            nfs_adpf_init(60);
+            unsigned initial_fps = frameLimit.load(std::memory_order_relaxed);
+            nfs_adpf_init(initial_fps > 0 ? initial_fps : 120);
         }
         nfs_adpf_end_frame();
         nfs_widescreen_apply_frame_rate();
         static void (*s_roam_tick)()=nullptr;
-        if(!s_roam_tick){
-            void* h=dlopen("libnfsu2_roam.so",RTLD_NOW|RTLD_GLOBAL);
-            if(h)s_roam_tick=reinterpret_cast<void(*)()>(dlsym(h,"nfs_roam_frame_tick"));
-            if(!s_roam_tick)s_roam_tick=reinterpret_cast<void(*)()>(dlsym(RTLD_DEFAULT,"nfs_roam_frame_tick"));
+        static bool s_roam_checked = false;
+        if(!s_roam_checked){
+            s_roam_checked = true;
+            s_roam_tick=reinterpret_cast<void(*)()>(dlsym(RTLD_DEFAULT,"nfs_roam_frame_tick"));
+            if(!s_roam_tick){
+                void* h=dlopen("libgame_core.so",RTLD_NOLOAD);
+                if(h) s_roam_tick=reinterpret_cast<void(*)()>(dlsym(h,"nfs_roam_frame_tick"));
+            }
         }
         if(s_roam_tick)s_roam_tick();
         static uint64_t s_last_token_ns = 0;
@@ -391,12 +396,17 @@ void d3dDispatch(){
         if(result==0){
             static FramePacer pacer;
             auto now=std::chrono::steady_clock::now();
-            auto deadline=pacer.deadline(now,frameLimit.load(std::memory_order_relaxed));
-            // The renderer has returned; guest audio/streaming workers can use the
-            // machine while this thread waits. Late frames incur no extra delay.
+            unsigned limit = frameLimit.load(std::memory_order_relaxed);
             renderThread=true;
-            if(deadline>now)yieldGuestMachine(0,deadline);
-            else if(machine.hasWaiters())yieldGuestMachine(0);
+            if(limit > 0){
+                auto deadline=pacer.deadline(now,limit);
+                if(deadline>now)yieldGuestMachine(0,deadline);
+                else if(machine.hasWaiters())yieldGuestMachine(0);
+            } else {
+                // Uncapped / maximum throughput mode:
+                // No deadline sleep. Immediately proceed to next frame at 100% duty cycle.
+                if(machine.hasWaiters())yieldGuestMachine(0);
+            }
         } else {
             // Window temporarily unavailable or device lost during incoming call / backgrounding.
             // Sleep 16ms so the guest doesn't spin at 100% CPU starving audio/compositor threads.
@@ -459,7 +469,7 @@ inline void syncPreTimestepPacing() {
     s_last_phys_time = now;
 
     if (memory->readable(0x008654a4u, 4) && read32(0x008654a4u) == 6u) {
-        if (real_elapsed > 0.010f && real_elapsed < 0.200f) {
+        if (real_elapsed > 0.004f && real_elapsed < 0.200f) {
             float current_wdt = 0.0f, current_realdt = 0.0f;
             std::memcpy(&current_wdt, ptr(0x00865154u, 4), 4);
             std::memcpy(&current_realdt, ptr(0x00865198u, 4), 4);
@@ -467,7 +477,7 @@ inline void syncPreTimestepPacing() {
             if (effective_dt > 0.0f && effective_dt < real_elapsed * 0.90f) {
                 std::memcpy(ptr(0x00865154u, 4), &real_elapsed, 4);
                 std::memcpy(ptr(0x00865198u, 4), &real_elapsed, 4);
-                write32(0x00865140u, static_cast<uint32_t>(real_elapsed * 1800.0f));
+                write32(0x00865140u, static_cast<uint32_t>(real_elapsed * 3600.0f));
             }
         }
     }
@@ -1251,6 +1261,7 @@ void setGuestResolution(unsigned width,unsigned height){
 void setGuestFrameLimit(unsigned framesPerSecond){
     frameLimit=(framesPerSecond>=30&&framesPerSecond<=240)?framesPerSecond:0;
     nfs_widescreen_set_frame_rate(frameLimit.load());
+    nfs_adpf_init(frameLimit.load() > 0 ? frameLimit.load() : 120);
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Android frame limit %u FPS (0 means uncapped)",frameLimit.load());
 }
 void setGuestKey(unsigned scan,bool down){if(scan>=256)return;std::lock_guard<std::mutex> lock(inputMutex);if(bool(inputKeys[scan])==down)return;inputKeys[scan]=down?0x80:0;recordInputKey(scan,down);enqueueGuestKey(scan,down);}

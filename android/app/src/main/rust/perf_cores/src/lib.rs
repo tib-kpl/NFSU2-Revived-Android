@@ -19,6 +19,7 @@ pub mod logger;
 pub mod soc_tuner;
 pub mod diagnostics;
 pub mod game_manager;
+pub mod gpu_governor;
 pub use adpf::*;
 pub use steering_pacer::*;
 pub use tuner::*;
@@ -26,6 +27,7 @@ pub use logger::*;
 pub use soc_tuner::*;
 pub use diagnostics::*;
 pub use game_manager::*;
+pub use gpu_governor::*;
 
 use std::fs;
 use std::os::raw::{c_int, c_long};
@@ -115,9 +117,11 @@ impl CpuCluster {
             lowest_freq = 0;
         }
 
-        // Secondary detection: Parse /proc/cpuinfo for known ARM Cortex part numbers
+        // Secondary detection: Parse /proc/cpuinfo for known ARM Cortex and Qualcomm Oryon part numbers
+        let mut is_all_big_soc = false;
         if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
             let mut cur_cpu: i32 = -1;
+            let mut is_qualcomm = false;
             for line in cpuinfo.lines() {
                 let trimmed = line.trim();
                 if trimmed.starts_with("processor") {
@@ -126,10 +130,30 @@ impl CpuCluster {
                             cur_cpu = cpu_id;
                         }
                     }
+                } else if trimmed.starts_with("CPU implementer") {
+                    if let Some(colon) = trimmed.find(':') {
+                        let impl_str = trimmed[colon + 1..].trim();
+                        if let Ok(imp) = u32::from_str_radix(impl_str.trim_start_matches("0x"), 16) {
+                            if imp == 0x51 {
+                                is_qualcomm = true;
+                            }
+                        }
+                    }
+                } else if trimmed.starts_with("Hardware") || trimmed.starts_with("model name") {
+                    let lower = trimmed.to_lowercase();
+                    if lower.contains("sm8750") || lower.contains("sun") || lower.contains("oryon")
+                        || lower.contains("mt6989") || lower.contains("mt6991")
+                        || lower.contains("dimensity 9300") || lower.contains("dimensity 9400")
+                    {
+                        is_all_big_soc = true;
+                    }
                 } else if trimmed.starts_with("CPU part") && cur_cpu >= 0 && (cur_cpu as usize) < total_cores {
                     if let Some(colon) = trimmed.find(':') {
                         let part_str = trimmed[colon + 1..].trim();
                         let part = u32::from_str_radix(part_str.trim_start_matches("0x"), 16).unwrap_or(0);
+                        if is_qualcomm && (part == 0x001 || part == 0x002 || part == 0x005 || (part >= 0x800 && part <= 0x805)) {
+                            is_all_big_soc = true;
+                        }
                         let role = match part {
                             // Prime / Ultra-high performance cores (Cortex-X1/X2/X3/X4, Cortex-X925)
                             0xd44 | 0xd48 | 0xd4e | 0xd4f | 0xd82 => Some(CoreClusterRole::Prime),
@@ -158,7 +182,16 @@ impl CpuCluster {
         let mut little_cores_mask: u64 = 0;
 
         for (id, freq, cap, explicit_role) in raw_cores {
-            let role = if let Some(r) = explicit_role {
+            let role = if is_all_big_soc {
+                // All-big SoC (Snapdragon 8 Elite SM8750 Oryon, Dimensity 9300/9400):
+                // All cores are high-performance cores, zero Little efficiency cores!
+                // Top 2 cores are Prime (e.g. 4.32GHz), others are Mid/Performance (e.g. 3.53GHz).
+                if id >= total_cores.saturating_sub(2) {
+                    CoreClusterRole::Prime
+                } else {
+                    CoreClusterRole::Mid
+                }
+            } else if let Some(r) = explicit_role {
                 r
             } else if highest_freq > 0 && lowest_freq > 0 && highest_freq > lowest_freq {
                 let prime_thresh = (highest_freq as f64 * 0.92) as u64;
@@ -179,14 +212,14 @@ impl CpuCluster {
                     CoreClusterRole::Little
                 }
             } else {
-                // Topology fallback: top 25% prime, next 25% mid, bottom 50% little
+                // Architectural fallback when sysfs is restricted by SELinux:
+                // Treat all available cores as performance-capable (top 25% Prime, remainder Mid)
+                // to prevent starving the guest engine of CPU cores on unrecognized modern chips.
                 let ratio = (id as f64) / (total_cores as f64);
                 if ratio >= 0.75 {
                     CoreClusterRole::Prime
-                } else if ratio >= 0.50 {
-                    CoreClusterRole::Mid
                 } else {
-                    CoreClusterRole::Little
+                    CoreClusterRole::Mid
                 }
             };
 
@@ -267,24 +300,28 @@ impl CpuCluster {
         } else {
             all_cores_mask
         };
+        // Span across all performance cores (Prime + Mid clusters) so the emulator,
+        // D3D9 bridge, and Vulkan command encoders can fully utilize multiple CPU cores
+        // instead of throttling on a single core.
         let render_mask = perf_mask;
 
         unsafe {
-            // Process-level default affinity: performance cores (or all cores fallback)
-            let mask_val = render_mask as c_long;
+            // Process-level default affinity: allow all cores so OS/driver helper threads aren't restricted
+            let all_mask_val = all_cores_mask as c_long;
             let _ = libc::syscall(
                 libc::SYS_sched_setaffinity,
                 libc::getpid() as c_int,
                 std::mem::size_of::<c_long>(),
-                &mask_val as *const c_long,
+                &all_mask_val as *const c_long,
             );
 
-            // Calling thread affinity (RenderMain / UI thread): maximum priority nice -20
+            // Calling thread affinity (RenderMain / UI thread): all performance cores (nice -20)
+            let render_mask_val = render_mask as c_long;
             let ret = libc::syscall(
                 libc::SYS_sched_setaffinity,
                 0 as c_int,
                 std::mem::size_of::<c_long>(),
-                &mask_val as *const c_long,
+                &render_mask_val as *const c_long,
             );
             let _ = libc::setpriority(libc::PRIO_PROCESS, libc::getpid() as u32, -20);
             let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -20);
@@ -508,6 +545,9 @@ pub unsafe extern "C" fn Java_io_mininxd_nfsu2_GamePerformanceBooster_nativeAppl
     // 2. Bind process and all threads in /proc/self/task to performance CPU cluster
     let cluster = CpuCluster::detect();
     let _ = cluster.apply_affinity();
+
+    // 2b. Start GPU Governor Keeper to lock peak GPU clock and prevent race/explore downclocking
+    start_gpu_governor_keeper();
 
     // 3. Platform-specific OEM booster coordination (Xiaomi HyperOS / Joyose, MediaTek)
     if let Ok(perf_class) = env.find_class("android/os/PerfService") {

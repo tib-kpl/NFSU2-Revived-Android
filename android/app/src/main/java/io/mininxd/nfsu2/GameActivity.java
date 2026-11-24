@@ -291,6 +291,11 @@ public final class GameActivity extends NativeActivity {
                 io.mininxd.nfsu2.net.RoamNativeBridge.nativeSetFrameLimit(framesPerSecond);
             }
         } catch (Throwable ignored) {}
+        try {
+            if (s_instance != null) {
+                AndroidGameManagerBridge.setGameplayMode(s_instance, framesPerSecond > 0 ? framesPerSecond : 120);
+            }
+        } catch (Throwable ignored) {}
     }
     private static void nativeWidescreen(boolean enabled) { com.nfsu2.androidevolved.GameActivity.nativeWidescreen(enabled); }
     private static void nativeScreenMode(int mode) {
@@ -738,6 +743,13 @@ public final class GameActivity extends NativeActivity {
                 maxField.setFloat(windowParams, Math.min(120.0f, refresh));
             } catch (Throwable ignored) {}
             getWindow().setAttributes(windowParams);
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    android.view.View decor = getWindow().getDecorView();
+                    java.lang.reflect.Method sfr = decor.getClass().getMethod("setFrameRate", float.class, int.class);
+                    sfr.invoke(decor, Math.min(120f, refresh), 0);
+                } catch (Throwable ignored) {}
+            }
         } catch (Throwable ignored) {}
     }
 
@@ -797,11 +809,13 @@ public final class GameActivity extends NativeActivity {
         if (statusWindow != null) statusWindow.dismiss();
         if (touchControls != null) {touchControls.removeCallbacks(updateControlMode);touchControls.releaseAll();}
         if (controlsWindow != null) controlsWindow.dismiss();
+        GpuClockGovernor.pause();
         super.onPause();
     }
     @Override protected void onResume() {
         super.onResume();
         foreground=true;
+        GpuClockGovernor.resume();
         requestGameAudioFocus();
         startCompanionTicker();
         holdLanBroadcasts(true);
@@ -1003,6 +1017,7 @@ public final class GameActivity extends NativeActivity {
         }
         super.onDestroy();
         stopCompanionTicker();
+        GpuClockGovernor.stop();
         if (diagnosticOverlay != null) diagnosticOverlay.stop();
         AdhocRoamClient.getInstance().stop();
         // Each launch uses a fresh guest machine in the dedicated :game process.

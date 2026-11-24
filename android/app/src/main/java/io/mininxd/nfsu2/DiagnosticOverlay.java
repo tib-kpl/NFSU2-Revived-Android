@@ -440,7 +440,8 @@ public final class DiagnosticOverlay {
         }
         String fpsStr = (fps >= 100.0f) ? String.format(Locale.US, "%.0f", fps) : String.format(Locale.US, "%.1f", fps);
 
-        float cpu = (telemetryBuffer[2] > 0.0f) ? telemetryBuffer[2] : sampleCpuUsage();
+        float cpuRaw = (telemetryBuffer[2] > 0.0f) ? telemetryBuffer[2] : sampleCpuUsage();
+        float cpu = Math.max(0.0f, Math.min(100.0f, cpuRaw));
 
         // Memory
         ActivityManager am = (ActivityManager) activity.getSystemService(Context.ACTIVITY_SERVICE);
@@ -645,14 +646,14 @@ public final class DiagnosticOverlay {
             }
         } catch (Exception ignored) {}
 
-        // Fallback: process CPU accounting
+        // Fallback: process CPU accounting normalized by total available cores (0.0% to 100.0%)
         long nowWall = SystemClock.elapsedRealtime();
         long nowCpu = Process.getElapsedCpuTime();
         if (lastWallTime > 0 && nowWall > lastWallTime) {
             long cpuDiff = nowCpu - lastProcessCpuTime;
             long wallDiff = nowWall - lastWallTime;
             int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
-            lastCpuPercent = (cpuDiff * 100.0f) / (wallDiff * cores);
+            lastCpuPercent = (cpuDiff * 100.0f) / (Math.max(1L, wallDiff) * cores);
         }
         lastWallTime = nowWall;
         lastProcessCpuTime = nowCpu;
@@ -701,13 +702,21 @@ public final class DiagnosticOverlay {
         float cpu = lastCpuPercent;
 
         float estimated;
-        if (cpu > 70.0f && liveGameFps < (targetFps * 0.70f)) {
-            // CPU Bound bottleneck: GPU is stalled waiting for guest x86 JIT/draw call emission
-            estimated = Math.min(48.0f, Math.max(12.0f, (liveGameFps / targetFps) * 45.0f));
+        if (liveGameFps >= (targetFps * 0.90f)) {
+            // Reaching full target frame rate (e.g. garage, showroom, menus, or light scenes):
+            // GPU is rendering lightweight geometry within ~2-3ms of a 16.6ms budget.
+            // Avoid misleadingly pegging GPU to 95-98% in menus/garage.
+            float loadPct = 25.0f + (cpu * 0.20f);
+            estimated = Math.min(45.0f, Math.max(20.0f, loadPct));
+        } else if (cpu > 70.0f) {
+            // CPU Bound bottleneck (races, traffic, physics, world streaming):
+            // GPU finishes rendering early and spends the remaining frame interval idle.
+            float ratio = Math.max(0.2f, liveGameFps / targetFps);
+            estimated = Math.min(50.0f, Math.max(18.0f, ratio * 45.0f));
         } else {
-            // Normal / GPU active: scale proportionally without artificial 100% pegging
+            // Balanced gameplay load: scale to real frame delivery vs budget
             float efficiency = Math.min(1.0f, targetMs / Math.max(1.0f, actualMs));
-            estimated = Math.min(85.0f, Math.max(18.0f, efficiency * 68.0f));
+            estimated = Math.min(65.0f, Math.max(25.0f, efficiency * 60.0f));
         }
 
         if (smoothedGpuPercent < 0.0f) {

@@ -1732,6 +1732,12 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
     s_last_tick_ns = now_tick_ns;
     hiddenraces_frame_tick();
     extraoptions_frame_tick();
+    garage_frame_tick();
+    feng_ui_expand_tick();
+    menu_fixes_tick();
+    sndlead_frame_tick();
+    whine_frame_tick();
+    framerate_tick_base_apply();
     lobby_frame_tick();
     framerate_pacing_fix();
     resolution_frame_tick();
@@ -1742,6 +1748,22 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
         roam_apply_gamepad_layout(0);
         s_gamepad_hooked_tick = 1;
     }
+    int is_gameplay = 0;
+    if (g_p_mem_base && *g_p_mem_base && rh_mem_committed(0x008654a4u, 4)) {
+        is_gameplay = (MR32(0x008654a4u) == 6u);
+    }
+    static void(*s_gpu_gov_tick)(int) = NULL;
+    static int s_gpu_gov_checked = 0;
+    if (!s_gpu_gov_checked) {
+        s_gpu_gov_checked = 1;
+        s_gpu_gov_tick = (void(*)(int))dlsym(RTLD_DEFAULT, "nfs_gpu_governor_tick");
+        if (!s_gpu_gov_tick) {
+            void* hp = dlopen("libperf_cores.so", RTLD_NOLOAD);
+            if (!hp) hp = dlopen("libperf_cores.so", RTLD_NOW | RTLD_GLOBAL);
+            if (hp) s_gpu_gov_tick = (void(*)(int))dlsym(hp, "nfs_gpu_governor_tick");
+        }
+    }
+    if (s_gpu_gov_tick) s_gpu_gov_tick(is_gameplay);
     roam_game_frame(NULL);
     atomic_store(&s_tick_in_progress, 0);
 }

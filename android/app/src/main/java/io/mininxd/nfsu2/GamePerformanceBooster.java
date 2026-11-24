@@ -73,18 +73,26 @@ public final class GamePerformanceBooster {
             File cacheDir = new File(activity.getCacheDir(), "graphics-cache");
             if (nativeDxvkLoaded) {
                 try {
-                    String rootDir = LauncherActivity.gameRoot(activity).getAbsolutePath();
-                    nativeConfigureDxvkAndDriver(cacheDir.getAbsolutePath(), rootDir);
-                    Log.i(TAG, "Configured native Rust graphics tuner and driver environment for: " + rootDir);
+                    String rootDir = LauncherActivity.gameRoot(activity).getAbsolutePath();
+                    nativeConfigureDxvkAndDriver(cacheDir.getAbsolutePath(), rootDir);
+                    Log.i(TAG, "Configured native Rust graphics tuner and driver environment for: " + rootDir);
                 } catch (Throwable t) {
                     Log.w(TAG, "nativeConfigureDxvkAndDriver failed: " + t.getMessage());
                 }
             }
 
             // 3. Android platform frame scheduler & sustained performance hooks
-            AndroidGameManagerBridge.setGameplayMode(activity, 60);
+            int targetFps = 60;
+            try {
+                targetFps = Integer.parseInt(GameOptions.get(activity, GameOptions.FPS));
+                if (targetFps <= 0) targetFps = 120; // Uncapped maps to 120Hz display target
+            } catch (Throwable ignored) {}
+            AndroidGameManagerBridge.setGameplayMode(activity, targetFps);
             configureAndroidGameManager(activity);
             enableSustainedPerformance(activity, window);
+
+            // 4. Dedicated GPU Clock Sustainer & DVFS Governor
+            GpuClockGovernor.start(activity);
 
             Log.i(TAG, "GamePerformanceBooster optimizations successfully applied");
         } catch (Throwable t) {

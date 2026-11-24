@@ -3,12 +3,25 @@
 #include "roam_affinity.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <sched.h>
 #include <dlfcn.h>
 #include <sys/resource.h>
 #include <android/log.h>
+
+static int contains_case_insensitive(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return 1;
+    for (; *haystack; haystack++) {
+        if (strncasecmp(haystack, needle, needle_len) == 0) return 1;
+    }
+    return 0;
+}
 
 int nfs_bind_to_perf_cores(void) {
     typedef int (*FnBindPerf)(void);
@@ -71,7 +84,22 @@ int nfs_bind_to_perf_cores(void) {
     // On big.LITTLE / tri-cluster architectures, cores with >= 70% of max frequency or capacity
     // represent the mid/big and prime cores, while little efficiency cores are excluded.
     long threshold = (long)(highest_freq * 0.70);
-    if (highest_freq > 0) {
+    int is_all_big_soc = 0;
+    FILE *f_cpu = fopen("/proc/cpuinfo", "r");
+    if (f_cpu) {
+        char line[256];
+        while (fgets(line, sizeof(line), f_cpu)) {
+            if (contains_case_insensitive(line, "sm8750") || contains_case_insensitive(line, "sun") || contains_case_insensitive(line, "oryon") ||
+                contains_case_insensitive(line, "mt6989") || contains_case_insensitive(line, "mt6991") ||
+                contains_case_insensitive(line, "dimensity 9300") || contains_case_insensitive(line, "dimensity 9400")) {
+                is_all_big_soc = 1;
+                break;
+            }
+        }
+        fclose(f_cpu);
+    }
+
+    if (highest_freq > 0 && !is_all_big_soc) {
         for (int i = 0; i < total_cpus; i++) {
             if (freqs[i] >= threshold) {
                 CPU_SET(i, &cpuset);
@@ -80,8 +108,10 @@ int nfs_bind_to_perf_cores(void) {
         }
     }
 
-    // Safety fallback: if thresholding produced 0 cores or all cores, use all cores
-    if (count == 0) {
+    // Safety fallback: if all-big SoC, or thresholding produced 0 cores or all cores, use all cores
+    if (count == 0 || is_all_big_soc) {
+        CPU_ZERO(&cpuset);
+        count = 0;
         for (int i = 0; i < total_cpus; i++) {
             CPU_SET(i, &cpuset);
             count++;
