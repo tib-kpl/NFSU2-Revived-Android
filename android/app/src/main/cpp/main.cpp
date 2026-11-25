@@ -356,7 +356,7 @@ static int32_t onInput(android_app* app,AInputEvent* event){
         // Same codes the pad table maps to Start / Select: some pads report Select as Back and Start as Menu.
         bool isStart=code==AKEYCODE_BUTTON_START||code==AKEYCODE_BUTTON_10||code==AKEYCODE_MENU;
         bool isSelect=code==AKEYCODE_BUTTON_SELECT||code==AKEYCODE_BUTTON_9||code==AKEYCODE_BACK;
-        if(isStart||isSelect)__android_log_print(ANDROID_LOG_INFO,"NFSU2-Pad","%s key %d (%s)",down?"down":"up",code,isStart?"start":"select");
+        {static int logged=0;if(logged<300){++logged;__android_log_print(ANDROID_LOG_INFO,"NFSU2-Pad","%s key %d dev %d src %x%s%s",down?"down":"up",code,AInputEvent_getDeviceId(event),AInputEvent_getSource(event),isStart?" [start]":"",isSelect?" [select]":"");}}
         if(isStart)startHeld=down;
         else if(isSelect)selectHeld=down;
         if(down&&startHeld&&selectHeld&&AKeyEvent_getRepeatCount(event)==0){
