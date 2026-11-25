@@ -353,8 +353,12 @@ static int32_t onInput(android_app* app,AInputEvent* event){
     {
         static bool startHeld=false,selectHeld=false;
         int32_t code=AKeyEvent_getKeyCode(event);bool down=AKeyEvent_getAction(event)==AKEY_EVENT_ACTION_DOWN;
-        if(code==AKEYCODE_BUTTON_START||code==AKEYCODE_BUTTON_10)startHeld=down;
-        else if(code==AKEYCODE_BUTTON_SELECT||code==AKEYCODE_BUTTON_9)selectHeld=down;
+        // Same codes the pad table maps to Start / Select: some pads report Select as Back and Start as Menu.
+        bool isStart=code==AKEYCODE_BUTTON_START||code==AKEYCODE_BUTTON_10||code==AKEYCODE_MENU;
+        bool isSelect=code==AKEYCODE_BUTTON_SELECT||code==AKEYCODE_BUTTON_9||code==AKEYCODE_BACK;
+        if(isStart||isSelect)__android_log_print(ANDROID_LOG_INFO,"NFSU2-Pad","%s key %d (%s)",down?"down":"up",code,isStart?"start":"select");
+        if(isStart)startHeld=down;
+        else if(isSelect)selectHeld=down;
         if(down&&startHeld&&selectHeld&&AKeyEvent_getRepeatCount(event)==0){
             startHeld=selectHeld=false;requestSettingsPanel(app);return 1;
         }
