@@ -3455,7 +3455,7 @@ static inline void call_orig_decode_dxt(uint32_t mode, uint32_t width, uint32_t 
     register void *fn __asm__("x16") = s_orig_decode_dxt;
     __asm__ volatile(
         "blr %x[fn]"
-        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4), "+r"(r8), "+r"(fn)
+        : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4), "+r"(r8), [fn] "+r"(fn)
         :
         : "x5", "x6", "x7", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x17", "x30",
           "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7",
