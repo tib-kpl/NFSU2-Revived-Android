@@ -4,3 +4,4 @@
 *.py text eol=lf
 *.md text eol=lf
 *.bat text eol=crlf
+android/app/build.gradle merge=ours

@@ -45,8 +45,7 @@ jobs:
           # The prebuilt runtime hardcodes its data folder; make it relative so any game folder works.
           python3 scripts/patch_game_root.py android/app/src/main/jniLibs/arm64-v8a/libnfsu2_android.so
 
-      - name: Build Rust Native Modules (perf_cores, roam_rs, and graphics_cache)
-        continue-on-error: true
+      - name: Build Rust Native Modules (perf_cores, roam_rs, game_core, and graphics_cache)
         run: |
           rustup target add aarch64-linux-android || true
           CLANG_BIN=$(find "$ANDROID_HOME/ndk" "$ANDROID_NDK_ROOT" /usr/local/lib/android/sdk/ndk -name "aarch64-linux-android26-clang" 2>/dev/null | head -n 1)
@@ -114,7 +113,7 @@ jobs:
             RUST_OBJS="$ROAM_RUST_LIB"
           fi
 
-          $CLANG_BIN -std=c11 -O3 -fomit-frame-pointer -shared -fPIC -ffp-contract=off -fno-strict-aliasing \
+          $CLANG_BIN -std=c11 -O3 -fomit-frame-pointer -funwind-tables -shared -fPIC -ffp-contract=off -fno-strict-aliasing \
             -DROAM_HOST_ANDROID -DROAM_HOST_WIN=1 $RUST_FLAGS \
             -Iandroid/app/src/main/cpp/roam \
             android/app/src/main/cpp/roam/roam_core.c \

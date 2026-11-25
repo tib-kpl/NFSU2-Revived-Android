@@ -6,9 +6,9 @@ android {
         applicationId 'io.mininxd.nfsu2'
         minSdk 28
         targetSdk 35
-        // CI overrides these with -PversionCode / -PversionName.
-        versionCode = Integer.parseInt((project.findProperty('versionCode') ?: '89').toString())
-        versionName = (project.findProperty('versionName') ?: '0.15.25.beta8').toString()
+        // CI overrides these with -PversionCode / -PversionName.
+        versionCode = Integer.parseInt((project.findProperty('versionCode') ?: '110').toString())
+        versionName = (project.findProperty('versionName') ?: '1.1.beta1').toString()
         ndk { abiFilters 'arm64-v8a' }
     }
     signingConfigs {

@@ -6,7 +6,7 @@
 //! - `d3d9.forceSamplerTypeSpecConstants`: Specializes Vulkan samplers into constants, eliminating branch overhead.
 //! - `d3d9.lenientClear` and `d3d9.allowDiscard`: Removes redundant clearing and enables discard optimizations.
 //! - `d3d9.strictConstantCopies`: Disables redundant constant validation for faster push constant uploads.
-//! - `MESA_VK_WSI_PRESENT_MODE`: Selects mailbox presentation for minimum latency without screen tearing.
+//! - `MESA_VK_WSI_PRESENT_MODE`: Selects immediate presentation (VSync off) for minimum latency.
 
 use std::fs::File;
 use std::io::Write;
@@ -20,6 +20,8 @@ pub struct DxvkProfileConfig {
     pub invariant_position: bool,
     pub force_sampler_spec_constants: bool,
     pub strict_constant_copies: bool,
+    pub strict_pow: bool,
+    pub long_mad: bool,
     pub lenient_clear: bool,
     pub allow_discard: bool,
     pub allow_do_not_wait: bool,
@@ -50,6 +52,8 @@ impl Default for DxvkProfileConfig {
             invariant_position: true,
             force_sampler_spec_constants: true,
             strict_constant_copies: false,
+            strict_pow: false,
+            long_mad: false,
             lenient_clear: true,
             allow_discard: true,
             allow_do_not_wait: true,
@@ -63,14 +67,38 @@ impl Default for DxvkProfileConfig {
             use_fp16: true,
             enable_unified_image_layouts: true,
             track_pipeline_lifetime: false,
-            evict_managed_on_unlock: true,
+            evict_managed_on_unlock: false,
             defer_surface_creation: true,
             no_explicit_front_buffer: true,
-            tear_free: true,
+            tear_free: false,
             max_frame_latency: 2,
             num_compiler_threads: 4,
         }
     }
+}
+
+fn parse_bool_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Some(true),
+        "0" | "false" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn read_invariant_position_from_cfg(path: &Path) -> Option<bool> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            if k.trim().eq_ignore_ascii_case("invariant_position") {
+                return parse_bool_flag(v);
+            }
+        }
+    }
+    None
 }
 
 impl DxvkProfileConfig {
@@ -84,6 +112,8 @@ impl DxvkProfileConfig {
                 invariant_position: true,
                 force_sampler_spec_constants: true,
                 strict_constant_copies: true,
+                strict_pow: false,
+                long_mad: false,
                 lenient_clear: true,
                 allow_discard: true,
                 allow_do_not_wait: true,
@@ -97,7 +127,7 @@ impl DxvkProfileConfig {
                 use_fp16: true,
                 enable_unified_image_layouts: false,
                 track_pipeline_lifetime: false,
-                evict_managed_on_unlock: true,
+                evict_managed_on_unlock: false,
                 defer_surface_creation: true,
                 no_explicit_front_buffer: true,
                 tear_free: false,
@@ -106,6 +136,30 @@ impl DxvkProfileConfig {
             }
         } else {
             Self::default()
+        }
+    }
+
+    /// Reads optional user overrides from `<gameRoot>/extra_settings.cfg`.
+    pub fn apply_extra_settings(&mut self, preferred_dir: Option<&Path>) {
+        if let Some(dir) = preferred_dir {
+            if let Some(v) = read_invariant_position_from_cfg(&dir.join("extra_settings.cfg")) {
+                self.invariant_position = v;
+                return;
+            }
+        }
+        if let Ok(data_dir) = std::env::var("NFSU2_DATA_DIR") {
+            if !data_dir.is_empty() {
+                if let Some(v) = read_invariant_position_from_cfg(&Path::new(&data_dir).join("extra_settings.cfg")) {
+                    self.invariant_position = v;
+                    return;
+                }
+            }
+        }
+        for dir in ["/sdcard/nfsu2", "/storage/emulated/0/nfsu2"] {
+            if let Some(v) = read_invariant_position_from_cfg(&Path::new(dir).join("extra_settings.cfg")) {
+                self.invariant_position = v;
+                return;
+            }
         }
     }
 
@@ -151,15 +205,25 @@ impl DxvkProfileConfig {
             s.push_str("d3d9.deviceLocalConstantBuffers = False\n");
         }
         s.push_str("d3d9.strictConstantCopies = False\n");
+        s.push_str(if self.strict_pow { "d3d9.strictPow = True\n" } else { "d3d9.strictPow = False\n" });
+        s.push_str(if self.long_mad { "d3d9.longMad = True\n" } else { "d3d9.longMad = False\n" });
         s.push_str("d3d9.cachedDynamicBuffers = True\n");
         s.push_str("d3d9.cachedWriteOnlyBuffers = True\n");
         s.push_str("d3d9.noExplicitFrontBuffer = True\n");
         s.push_str("d3d9.useFP16 = Auto\n");
-        s.push_str("d3d9.evictManagedOnUnlock = True\n");
+        s.push_str(if self.evict_managed_on_unlock {
+            "d3d9.evictManagedOnUnlock = True\n"
+        } else {
+            "d3d9.evictManagedOnUnlock = False\n"
+        });
         s.push_str("d3d9.memoryTrackTest = False\n");
         s.push_str(&format!("d3d9.maxAvailableMemory = {}\n", self.max_device_memory_mb));
 
-        s.push_str("d3d9.invariantPosition = True\n");
+        s.push_str(if self.invariant_position {
+            "d3d9.invariantPosition = True\n"
+        } else {
+            "d3d9.invariantPosition = False\n"
+        });
         s.push_str("d3d9.forceSamplerTypeSpecConstants = True\n");
         s.push_str("d3d9.samplerAnisotropy = 0\n");
         s.push_str("d3d9.clampNegativeLodBias = True\n");
@@ -197,7 +261,7 @@ pub fn apply_driver_environment() {
         ("WINE_DISABLE_FULLSCREEN_HACK", "1"),
         ("WINE_DISABLE_HARDWARE_SCHEDULING", "1"),
         ("WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER", "1"),
-        ("MESA_VK_WSI_PRESENT_MODE", "mailbox"),
+        ("MESA_VK_WSI_PRESENT_MODE", "immediate"),
         ("MESA_SHADER_CACHE_DISABLE", "false"),
         ("MESA_SHADER_CACHE_MAX_SIZE", "1024MB"),
         ("mesa_glthread", "true"),
@@ -216,7 +280,8 @@ pub fn apply_driver_environment() {
     }
     candidate_dirs.extend(["/sdcard/nfsu2", "/storage/emulated/0/nfsu2", "."]);
     let backend = std::env::var("NFSU2_RENDERER").unwrap_or_default();
-    let config = DxvkProfileConfig::for_backend(&backend);
+    let mut config = DxvkProfileConfig::for_backend(&backend);
+    config.apply_extra_settings(None);
     for dir in &candidate_dirs {
         let p = Path::new(dir);
         if p.is_dir() {
@@ -248,7 +313,8 @@ pub unsafe extern "C" fn nfs_dxvk_tuner_generate_config(output_dir: *const std::
     let dir = Path::new(path_str);
     let conf_path = dir.join("dxvk.conf");
     let backend = std::env::var("NFSU2_RENDERER").unwrap_or_default();
-    let config = DxvkProfileConfig::for_backend(&backend);
+    let mut config = DxvkProfileConfig::for_backend(&backend);
+    config.apply_extra_settings(Some(dir));
     if config.write_to_file(&conf_path).is_ok() {
         0
     } else {
@@ -272,7 +338,12 @@ pub unsafe extern "C" fn Java_io_mininxd_nfsu2_GamePerformanceBooster_nativeConf
     apply_driver_environment();
 
     let backend = std::env::var("NFSU2_RENDERER").unwrap_or_default();
-    let config = DxvkProfileConfig::for_backend(&backend);
+    let mut config = DxvkProfileConfig::for_backend(&backend);
+    let sdcard_owned = env
+        .get_string(&sdcard_dir)
+        .ok()
+        .map(|s| s.to_string_lossy().into_owned());
+    config.apply_extra_settings(sdcard_owned.as_deref().map(Path::new));
 
     if let Ok(cache_str) = env.get_string(&cache_dir) {
         let path_str = cache_str.to_string_lossy();
@@ -285,9 +356,8 @@ pub unsafe extern "C" fn Java_io_mininxd_nfsu2_GamePerformanceBooster_nativeConf
         }
     }
 
-    if let Ok(sdcard_str) = env.get_string(&sdcard_dir) {
-        let path_str = sdcard_str.to_string_lossy();
-        let sdcard_path = Path::new(path_str.as_ref());
+    if let Some(path_str) = sdcard_owned.as_deref() {
+        let sdcard_path = Path::new(path_str);
         if sdcard_path.is_dir() {
             let conf_file = sdcard_path.join("dxvk.conf");
             let _ = config.write_to_file(&conf_file);
@@ -304,6 +374,9 @@ mod tests {
         let conf = DxvkProfileConfig::default();
         let formatted = conf.format_conf();
         assert!(formatted.contains("d3d9.invariantPosition = True"));
+        assert!(formatted.contains("d3d9.strictPow = False"));
+        assert!(formatted.contains("d3d9.longMad = False"));
+        assert!(formatted.contains("d3d9.evictManagedOnUnlock = False"));
         assert!(formatted.contains("d3d9.forceSamplerTypeSpecConstants = True"));
         assert!(formatted.contains("d3d9.strictConstantCopies = False"));
         assert!(formatted.contains("d3d9.forceSwapchainMSAA = False"));
@@ -318,12 +391,23 @@ mod tests {
     }
 
     #[test]
+    fn test_dxvk_conf_invariant_position_false() {
+        let mut conf = DxvkProfileConfig::default();
+        conf.invariant_position = false;
+        let formatted = conf.format_conf();
+        assert!(formatted.contains("d3d9.invariantPosition = False"));
+    }
+
+    #[test]
     fn test_dxvk_conf_opengl_backend() {
         let conf = DxvkProfileConfig::for_backend("opengl");
         let formatted = conf.format_conf();
         assert!(formatted.contains("dxvk.enableGraphicsPipelineLibrary = False"));
         assert!(formatted.contains("dxvk.enableDescriptorBuffer = False"));
         assert!(formatted.contains("d3d9.deviceLocalConstantBuffers = False"));
+        assert!(formatted.contains("d3d9.evictManagedOnUnlock = False"));
+        assert!(formatted.contains("d3d9.strictPow = False"));
+        assert!(formatted.contains("d3d9.longMad = False"));
         assert!(formatted.contains("d3d9.maxFrameLatency = 1"));
     }
 }
