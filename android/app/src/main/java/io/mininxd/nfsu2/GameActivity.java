@@ -408,7 +408,10 @@ public final class GameActivity extends NativeActivity {
     }
     @Override protected void onCreate(Bundle saved) {
         // The native runtime opens its data relative to the working directory: enter the chosen game folder first.
-        StorageFix.enter(LauncherActivity.gameRoot());
+        // The game runs in its own process: statics set by the launcher are gone, so the folder arrives as an intent extra.
+        String rootExtra = getIntent() != null ? getIntent().getStringExtra("gameRoot") : null;
+        if (rootExtra != null && !rootExtra.isEmpty()) LauncherActivity.sCustomGamePath = rootExtra;
+        StorageFix.enter(rootExtra != null && !rootExtra.isEmpty() ? new File(rootExtra) : LauncherActivity.gameRoot(this));
         super.onCreate(saved);
         LauncherActivity.sAppContext = getApplicationContext();
         s_instance = this;
