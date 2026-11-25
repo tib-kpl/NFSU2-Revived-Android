@@ -24,8 +24,6 @@
 #include "vulkan_driver.h"
 #include "universal_gpu_loader.h"
 #include "nfs_widescreen.h"
-#include "gamepad_camera.h"
-#include "gamepad_input_bridge.h"
 
 static android_app* s_active_app = nullptr;
 android_app* getActiveAndroidApp() {
@@ -50,23 +48,6 @@ static void showStatus(android_app* app, const char* message) {
     if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
     env->DeleteLocalRef(cls);
     app->activity->vm->DetachCurrentThread();
-}
-
-// Start + Select together open the settings over the game. The pad reaches the game through this native
-// queue only, so Java never sees those keys; ask GameActivity (on its UI thread) to show the panel.
-static void requestSettingsPanel(android_app* app) {
-    JNIEnv* env = nullptr;
-    bool attached = false;
-    if (app->activity->vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
-        if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
-        attached = true;
-    }
-    jclass cls = env->GetObjectClass(app->activity->clazz);
-    jmethodID method = env->GetMethodID(cls, "toggleSettings", "()V");
-    if (method) env->CallVoidMethod(app->activity->clazz, method);
-    if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); }
-    env->DeleteLocalRef(cls);
-    if (attached) app->activity->vm->DetachCurrentThread();
 }
 
 // Independent bring-up target. No guest game code is executed yet.
@@ -316,8 +297,6 @@ static void publishPad(){
         if(!s_roam_stick) s_roam_stick=reinterpret_cast<void(*)(float,float)>(dlsym(RTLD_DEFAULT,"roam_stick_input"));
     }
     if(s_roam_stick) s_roam_stick(state.rightX, state.rightY);
-    nfs_gamepad_camera_feed(state.rightX, state.rightY);
-    nfs_gamepad_bridge_feed_camera(state.rightX, state.rightY);
 }
 static void onCommand(android_app* app, int32_t command) {
     auto& h = *static_cast<Host*>(app->userData);
@@ -340,30 +319,14 @@ static void notePadUse(const AInputEvent* event){
         if(AMotionEvent_getAxisValue(event,axis,0)>.3f){gamepadUsed=true;return;}
 }
 extern "C" JNIEXPORT jboolean JNICALL Java_io_mininxd_nfsu2_GameActivity_nativeGamepadUsed(JNIEnv*,jclass){return gamepadUsed.exchange(false)?JNI_TRUE:JNI_FALSE;}
-static int32_t onInput(android_app* app,AInputEvent* event){
+static int32_t onInput(android_app*,AInputEvent* event){
     int32_t type=AInputEvent_getType(event);
     gamepad.setKeyEmulation(!guestGamepadInUse());
     if(type==AINPUT_EVENT_TYPE_MOTION){
-        nfs_gamepad_bridge_on_motion(event);
-        nfs_gamepad_camera_on_motion(event);
         if(!acceptedGamepad(event))return 0;
         bool handled=gamepad.motion(event,guestDrivingControls(),setPadKey);if(handled){notePadUse(event);publishPad();}return handled?1:0;
     }
     if(type!=AINPUT_EVENT_TYPE_KEY)return 0;
-    {
-        static bool startHeld=false,selectHeld=false;
-        int32_t code=AKeyEvent_getKeyCode(event);bool down=AKeyEvent_getAction(event)==AKEY_EVENT_ACTION_DOWN;
-        // Same codes the pad table maps to Start / Select: some pads report Select as Back and Start as Menu.
-        bool isStart=code==AKEYCODE_BUTTON_START||code==AKEYCODE_BUTTON_10||code==AKEYCODE_MENU;
-        bool isSelect=code==AKEYCODE_BUTTON_SELECT||code==AKEYCODE_BUTTON_9||code==AKEYCODE_BACK;
-        {static int logged=0;if(logged<300){++logged;__android_log_print(ANDROID_LOG_INFO,"NFSU2-Pad","%s key %d dev %d src %x%s%s",down?"down":"up",code,AInputEvent_getDeviceId(event),AInputEvent_getSource(event),isStart?" [start]":"",isSelect?" [select]":"");}}
-        if(isStart)startHeld=down;
-        else if(isSelect)selectHeld=down;
-        if(down&&startHeld&&selectHeld&&AKeyEvent_getRepeatCount(event)==0){
-            startHeld=selectHeld=false;requestSettingsPanel(app);return 1;
-        }
-    }
-    nfs_gamepad_bridge_on_key(event);
     // Any key of an accepted pad, whatever source it reports (pads in keyboard
     // mode send KEYBOARD); keys it does not map fall through to the table below.
     if(acceptedGamepad(event)&&gamepad.key(event,guestDrivingControls(),setPadKey)){notePadUse(event);publishPad();return 1;}
@@ -543,7 +506,6 @@ static void configurePipelineCache(android_app* app){
 }
 void android_main(android_app* app) {
     s_active_app = app;
-    nfs_gamepad_bridge_init(app->activity ? app->activity->vm : nullptr);
     configurePipelineCache(app);
     Host host; app->userData = &host; app->onAppCmd = onCommand;app->onInputEvent=onInput;
     try {

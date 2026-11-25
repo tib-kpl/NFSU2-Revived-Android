@@ -1004,7 +1004,13 @@ public final class GameActivity extends NativeActivity {
         GameSettingsOverlay.show(this);
     }
 
-    /** Called from the native input loop (Start + Select on the pad). */
+    /** Called from the native pad hook (Start + Select on the pad), on any thread. */
+    public static void requestSettingsToggle() {
+        GameActivity activity = s_instance;
+        if (activity != null) activity.toggleSettings();
+    }
+
+    /** Instance form of the above. */
     public void toggleSettings() {
         runOnUiThread(() -> GameSettingsOverlay.toggle(this));
     }
