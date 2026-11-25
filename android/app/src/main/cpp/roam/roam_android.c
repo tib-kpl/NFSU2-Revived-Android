@@ -303,6 +303,7 @@ static jclass          g_client_class = NULL;
 static jmethodID       g_mid_on_said = NULL;
 static jmethodID       g_mid_on_send = NULL;
 static jclass          g_game_activity_class = NULL;
+static jmethodID       g_mid_toggle_settings = NULL;
 static jmethodID       g_mid_fetch_news = NULL;
 static uint32_t        g_hub_ip = 0;
 static void            lobby_frame_tick(void);
@@ -4254,6 +4255,9 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
         if (ga_clz) {
             g_game_activity_class = (jclass)(*env)->NewGlobalRef(env, ga_clz);
             g_mid_fetch_news = (*env)->GetStaticMethodID(env, g_game_activity_class, "fetchNewsContent", "()Ljava/lang/String;");
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            g_mid_toggle_settings = (*env)->GetStaticMethodID(env, g_game_activity_class, "requestSettingsToggle", "()V");
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); g_mid_toggle_settings = NULL; }
             (*env)->DeleteLocalRef(env, ga_clz);
             if ((*env)->ExceptionCheck(env)) {
                 (*env)->ExceptionClear(env);
@@ -4594,8 +4598,42 @@ static const char *s_xbox_pad_names[] = {
     "LS", "RS"
 };
 
+/* The pad's keys reach the game only through its native input queue (Java never sees them), and every
+ * key goes through buttonFor. Start and Select seen within a short time of each other open the settings
+ * panel drawn by GameActivity (Java), on the UI thread. */
+static void roam_pad_settings_combo(int code) {
+    static int64_t t_start = 0, t_select = 0, t_fired = 0;
+    int is_start = (code == 108 || code == 197 || code == 82);
+    int is_select = (code == 109 || code == 196 || code == 4);
+    if (!is_start && !is_select) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (is_start) t_start = now; else t_select = now;
+    if (!t_start || !t_select || (t_start > t_select ? t_start - t_select : t_select - t_start) > 600) return;
+    if (t_fired && now - t_fired < 1500) return;
+    t_fired = now;
+    t_start = t_select = 0;
+    __android_log_print(ANDROID_LOG_INFO, "NFSU2-Pad", "Start+Select: opening the settings panel");
+    if (!g_jvm || !g_game_activity_class || !g_mid_toggle_settings) return;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    if ((*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != 0) return;
+        attached = 1;
+    }
+    (*env)->CallStaticVoidMethod(env, g_game_activity_class, g_mid_toggle_settings);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
+}
+
 __attribute__((visibility("default")))
 int _ZN12GamepadInput9buttonForEi(int code) {
+    {
+        static int logged = 0;
+        if (logged < 200) { logged++; __android_log_print(ANDROID_LOG_INFO, "NFSU2-Pad", "buttonFor(%d)", code); }
+    }
+    roam_pad_settings_combo(code);
     switch (code) {
         case 96: case 188: case 23: return 0;   /* A, Button 1, Dpad Center -> A */
         case 97: case 189: return 1;           /* B, Button 2 -> B */
