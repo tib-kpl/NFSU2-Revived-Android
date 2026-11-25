@@ -83,7 +83,7 @@ public final class GameOptions {
                     new String[] {"off", "compact", "full"},
                     new int[] {R.string.val_off, R.string.val_compact, R.string.val_full},
                     new String[3]),
-            new Option(WIDESCREEN, R.string.opt_widescreen, "off",
+            new Option(WIDESCREEN, R.string.opt_widescreen, "on",
                     new String[] {"on", "off"},
                     new int[] {R.string.val_on, R.string.val_off},
                     new String[2]),
