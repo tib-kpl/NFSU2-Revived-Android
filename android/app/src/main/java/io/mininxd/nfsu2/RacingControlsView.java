@@ -1540,7 +1540,7 @@ final class RacingControlsView extends View {
                         controlsHidden ? "Show Touch Buttons" : "Hide Touch Buttons",
                         "Save layout preset",
                         "Load layout preset",
-                        "Exit to Launcher"
+                        "Settings (launcher)"
                 }, (dialog, which) -> {
                     if (which == 0) chooseButtonSize();
                     else if (which == 1) chooseButtonOpacity();
@@ -1553,18 +1553,20 @@ final class RacingControlsView extends View {
                     else if (which == 8) confirmExitToLauncher();
                 })
                 .setPositiveButton("Close", null)
-                .setNegativeButton("Exit to Launcher", (dialog, which) -> confirmExitToLauncher())
+                .setNegativeButton("Settings", (dialog, which) -> confirmExitToLauncher())
                 .show();
     }
 
     private void confirmExitToLauncher() {
         Context ctx = getContext();
         new AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Exit to Launcher")
-                .setMessage("Are you sure you want to exit to the launcher?")
-                .setPositiveButton("Exit", (dialog, which) -> {
+                .setTitle("Settings")
+                .setMessage("Leave the game and open the settings?")
+                .setPositiveButton("Open", (dialog, which) -> {
                     dialog.dismiss();
-                    if (ctx instanceof Activity) {
+                    if (ctx instanceof GameActivity) {
+                        ((GameActivity) ctx).openSettings();
+                    } else if (ctx instanceof Activity) {
                         ((Activity) ctx).finish();
                     }
                 })

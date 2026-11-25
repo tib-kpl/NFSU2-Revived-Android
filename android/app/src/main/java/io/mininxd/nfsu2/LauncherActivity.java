@@ -149,7 +149,25 @@ public final class LauncherActivity extends Activity {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         setContentView(buildScreen());
         applyDisplayRefreshRate();
+        // Opened from the game's settings entry: stay here and never auto-start again.
+        if (getIntent().getBooleanExtra("from_game", false)) autoLaunchHandled = true;
+        if (!autoLaunchHandled) {
+            // Known, valid game files: go straight into the game without showing this screen.
+            refresh();
+            if (filesReady && "on".equals(GameOptions.get(this, GameOptions.AUTO_LAUNCH))
+                    && Diagnostics.unreportedCrash(this) == null) {
+                autoLaunchHandled = true;
+                launch();
+                return;
+            }
+        }
         checkUpdates(false);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent.getBooleanExtra("from_game", false)) autoLaunchHandled = true;
     }
 
     @Override protected void onResume() {
