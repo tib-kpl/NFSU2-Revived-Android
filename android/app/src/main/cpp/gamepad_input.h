@@ -143,7 +143,7 @@ private:
             want[0xcd]=past(stickX_,0xcd)||hatRight;
             want[0xc8]=buttons_[R2]||past(rightTrigger_,0xc8);
             want[0xd0]=buttons_[L2]||past(leftTrigger_,0xd0);
-            want[0x39]=buttons_[A];want[0x38]=buttons_[B];want[0x2e]=buttons_[X]||buttons_[ThumbR];want[0x30]=buttons_[Y];
+            want[0x39]=buttons_[A];want[0x1c]=buttons_[A];want[0x38]=buttons_[B];want[0x2e]=buttons_[X]||buttons_[ThumbR];want[0x30]=buttons_[Y];
             want[0x2a]=buttons_[R1];want[0x1d]=buttons_[L1];
             want[0x01]=buttons_[Start]||buttons_[Select];
             want[0x31]=buttons_[ThumbL];

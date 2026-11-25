@@ -121,8 +121,17 @@ void readFile(){
         if(hev)signalGuestEventIfPresent(hev);
         ret(1,5);return;
     }
-    do{count=::read(file->second,ptr(arg(1),arg(2)),arg(2));}while(count<0&&errno==EINTR);
-    if(count<0){lastError=fileError();ret(0,5);return;}if(arg(3))write32(arg(3),count);ret(1,5);
+    // ReadFile on a Windows disk file returns everything up to the end of the file; read() on
+    // Android's shared storage (FUSE, SD card) may return less, and the game would use the rest of
+    // its buffer as loaded data. Loop until the buffer is full or the file ends.
+    auto* target=static_cast<uint8_t*>(ptr(arg(1),arg(2)));uint32_t total=0;
+    while(total<arg(2)){
+        count=::read(file->second,target+total,arg(2)-total);
+        if(count<0){if(errno==EINTR)continue;lastError=fileError();ret(0,5);return;}
+        if(!count)break;
+        total+=uint32_t(count);
+    }
+    if(arg(3))write32(arg(3),total);ret(1,5);
 }
 void writeFile(){
     uint32_t ov=arg(4);
@@ -141,8 +150,13 @@ void writeFile(){
         if(hev)signalGuestEventIfPresent(hev);
         ret(1,5);return;
     }
-    do{count=::write(file->second,ptr(arg(1),arg(2)),arg(2));}while(count<0&&errno==EINTR);
-    if(count<0){lastError=fileError();ret(0,5);return;}write32(arg(3),uint32_t(count));ret(1,5);
+    auto* source=static_cast<const uint8_t*>(ptr(arg(1),arg(2)));uint32_t total=0;
+    while(total<arg(2)){
+        count=::write(file->second,source+total,arg(2)-total);
+        if(count<0){if(errno==EINTR)continue;lastError=fileError();ret(0,5);return;}
+        total+=uint32_t(count);
+    }
+    write32(arg(3),total);ret(1,5);
 }
 void flushFileBuffers(){auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,1);return;}
     int result;do{result=::fsync(file->second);}while(result&&errno==EINTR);if(result){lastError=fileError();ret(0,1);return;}ret(1,1);
