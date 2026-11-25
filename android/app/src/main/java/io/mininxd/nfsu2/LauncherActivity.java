@@ -187,11 +187,9 @@ public final class LauncherActivity extends Activity {
         super.onResume();
         resumed = true;
         refresh();
-        if (GameOptions.isRoamEnabled(this) && GameOptions.isDisplayLogsEnabled(this)) {
             AdhocRoamClient.getInstance().queryServerPlayers(this, () -> {
                 if (resumed) runOnUiThread(this::refreshOptions);
             });
-        }
         String crash = Diagnostics.unreportedCrash(this);
         if (crash != null) {
             Diagnostics.acknowledgeCrashes(this);
@@ -825,10 +823,15 @@ public final class LauncherActivity extends Activity {
                     String value = input.getText().toString().trim();
                     if (!GameOptions.validServer(value)) { message(getString(R.string.online_server_title), getString(R.string.invalid_server, value)); return; }
                     GameOptions.prefs(this).edit().putString(GameOptions.ONLINE_SERVER, value).apply();
+                    AdhocRoamClient.getInstance().resetServerStats();
                     refreshOptions();
+                    AdhocRoamClient.getInstance().queryServerPlayers(this, () -> {
+                        if (resumed) runOnUiThread(this::refreshOptions);
+                    });
                 })
                 .setNeutralButton(getString(R.string.reset), (dialog, which) -> {
                     GameOptions.prefs(this).edit().remove(GameOptions.ONLINE_SERVER).apply();
+                    AdhocRoamClient.getInstance().resetServerStats();
                     refreshOptions();
                 })
                 .setNegativeButton(getString(R.string.cancel), null).show();
