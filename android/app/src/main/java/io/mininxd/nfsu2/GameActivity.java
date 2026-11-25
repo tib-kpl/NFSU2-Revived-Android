@@ -988,6 +988,11 @@ public final class GameActivity extends NativeActivity {
         GameSettingsOverlay.show(this);
     }
 
+    /** Called from the native input loop (Start + Select on the pad). */
+    public void toggleSettings() {
+        runOnUiThread(() -> GameSettingsOverlay.toggle(this));
+    }
+
     @Override
     public boolean dispatchKeyEvent(android.view.KeyEvent event) {
         // Start + Select together open the settings over the game (the launcher itself is skipped at startup).
