@@ -132,4 +132,10 @@
     <string name="auto_launching">Starting the game… Touch the screen to cancel.</string>
     <string name="exe_wrong_version">SPEED2.EXE: wrong version (%1$d bytes)</string>
     <string name="status_wrong_exe">This SPEED2.EXE is not the unprotected v1.2 US executable (4,800,512 bytes) the game requires.</string>
+    <string name="game_settings_title">Settings</string>
+    <string name="game_settings_note">Most changes apply after "Apply and restart". Start + Select or B closes this panel.</string>
+    <string name="game_settings_restart">Apply and restart</string>
+    <string name="game_settings_launcher">Full settings</string>
+    <string name="game_settings_close">Close</string>
+
 </resources>

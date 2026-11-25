@@ -983,22 +983,20 @@ public final class GameActivity extends NativeActivity {
 
     private boolean startHeld, selectHeld;
 
-    /** Leaves the game and shows the launcher settings (it never auto-starts the game again when opened this way). */
+    /** Settings drawn over the running game. */
     void openSettings() {
-        startActivity(new Intent(this, LauncherActivity.class).putExtra("from_game", true)
-                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
-        finish();
+        GameSettingsOverlay.show(this);
     }
 
     @Override
     public boolean dispatchKeyEvent(android.view.KeyEvent event) {
-        // Start + Select together open the launcher settings (the launcher itself is skipped at startup).
+        // Start + Select together open the settings over the game (the launcher itself is skipped at startup).
         int code = event.getKeyCode();
         if (code == android.view.KeyEvent.KEYCODE_BUTTON_START || code == android.view.KeyEvent.KEYCODE_BUTTON_SELECT) {
             boolean down = event.getAction() == android.view.KeyEvent.ACTION_DOWN;
             if (code == android.view.KeyEvent.KEYCODE_BUTTON_START) startHeld = down; else selectHeld = down;
             if (down && startHeld && selectHeld && event.getRepeatCount() == 0) {
-                openSettings();
+                GameSettingsOverlay.toggle(this);
                 return true;
             }
         }

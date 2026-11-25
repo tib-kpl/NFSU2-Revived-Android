@@ -151,6 +151,13 @@ public final class LauncherActivity extends Activity {
         applyDisplayRefreshRate();
         // Opened from the game's settings entry: stay here and never auto-start again.
         if (getIntent().getBooleanExtra("from_game", false)) autoLaunchHandled = true;
+        if (getIntent().getBooleanExtra("restart_game", false)) {
+            // "Apply and restart" in the in-game settings: start the game again with the new options.
+            autoLaunchHandled = true;
+            getIntent().removeExtra("restart_game");
+            refresh();
+            if (filesReady) { launch(); return; }
+        }
         if (!autoLaunchHandled) {
             // Known, valid game files: go straight into the game without showing this screen.
             refresh();
@@ -168,6 +175,12 @@ public final class LauncherActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (intent.getBooleanExtra("from_game", false)) autoLaunchHandled = true;
+        if (intent.getBooleanExtra("restart_game", false)) {
+            autoLaunchHandled = true;
+            intent.removeExtra("restart_game");
+            refresh();
+            if (filesReady) launch();
+        }
     }
 
     @Override protected void onResume() {

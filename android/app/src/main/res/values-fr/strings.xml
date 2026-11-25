@@ -133,4 +133,10 @@
     <string name="auto_launching">Lancement du jeu… Touchez l\'écran pour annuler.</string>
     <string name="exe_wrong_version">SPEED2.EXE : mauvaise version (%1$d octets)</string>
     <string name="status_wrong_exe">Ce SPEED2.EXE n\'est pas l\'exécutable v1.2 US non protégé (4 800 512 octets) requis par le jeu.</string>
+    <string name="game_settings_title">Paramètres</string>
+    <string name="game_settings_note">La plupart des changements s\'appliquent après « Appliquer et redémarrer ». Start + Select ou B ferme ce panneau.</string>
+    <string name="game_settings_restart">Appliquer et redémarrer</string>
+    <string name="game_settings_launcher">Tous les réglages</string>
+    <string name="game_settings_close">Fermer</string>
+
 </resources>

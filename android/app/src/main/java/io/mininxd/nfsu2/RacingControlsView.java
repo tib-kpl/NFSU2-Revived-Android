@@ -1540,7 +1540,7 @@ final class RacingControlsView extends View {
                         controlsHidden ? "Show Touch Buttons" : "Hide Touch Buttons",
                         "Save layout preset",
                         "Load layout preset",
-                        "Settings (launcher)"
+                        "Settings"
                 }, (dialog, which) -> {
                     if (which == 0) chooseButtonSize();
                     else if (which == 1) chooseButtonOpacity();
@@ -1559,19 +1559,7 @@ final class RacingControlsView extends View {
 
     private void confirmExitToLauncher() {
         Context ctx = getContext();
-        new AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Settings")
-                .setMessage("Leave the game and open the settings?")
-                .setPositiveButton("Open", (dialog, which) -> {
-                    dialog.dismiss();
-                    if (ctx instanceof GameActivity) {
-                        ((GameActivity) ctx).openSettings();
-                    } else if (ctx instanceof Activity) {
-                        ((Activity) ctx).finish();
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        if (ctx instanceof GameActivity) ((GameActivity) ctx).openSettings();
     }
 
     private void chooseStyle() {
