@@ -60,7 +60,7 @@ public final class GameOptions {
             GRAPHICS_BACKEND = "graphics_backend", DRAW_DISTANCE = "draw_distance",
             TRACKSIDE_CROWDS = "trackside_crowds", REGION = "region", SPEEDOMETER = "speedometer", PAD_LAYOUT = "pad_layout",
             AUTO_LAUNCH = "auto_launch",
-            CUSTOM_GAME_DIR = "custom_game_dir";
+            CUSTOM_GAME_DIR = "custom_game_dir", ASI_LOADER = "asi_loader";
 
     static final Option[] ALL = {
             new Option(GRAPHICS_BACKEND, R.string.opt_graphics_api, "auto",
@@ -220,7 +220,12 @@ public final class GameOptions {
         }
         try {
             java.io.File gr = LauncherActivity.gameRoot(context);
-            String[] candidates = {
+            String custom = context != null ? prefs(context).getString(CUSTOM_GAME_DIR, null) : null;
+            boolean hasCustom = custom != null && !custom.trim().isEmpty();
+            String[] candidates = hasCustom ? new String[] {
+                gr != null ? gr.getAbsolutePath() + "/GLOBALTEXTURESROW.BIN" : null,
+                gr != null ? gr.getAbsolutePath() + "/globaltexturesrow.bin" : null,
+            } : new String[] {
                 gr != null ? gr.getAbsolutePath() + "/GLOBALTEXTURESROW.BIN" : null,
                 gr != null ? gr.getAbsolutePath() + "/globaltexturesrow.bin" : null,
                 android.os.Environment.getExternalStorageDirectory() + "/nfsu2/GLOBALTEXTURESROW.BIN",

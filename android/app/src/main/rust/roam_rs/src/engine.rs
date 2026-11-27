@@ -4,7 +4,6 @@
 //! high-refresh rate unlocks, projector headlight clamping, and spectator crowd suppression.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::interp::pacing_filter_dt;
 
 pub const G_TIMESTEP_ADDR: usize = 0x007875BC;
 pub const G_DELTA_ACCUM_ADDR: usize = 0x00865558;
@@ -19,6 +18,7 @@ pub const G_BLEACH_BYPASS_ENABLE_ADDR: usize = 0x00870D00;
 pub const G_SIM_WDT_ADDR: usize = 0x00865154;
 pub const G_SIM_REALDT_ADDR: usize = 0x00865198;
 pub const G_SIM_STEPS_ADDR: usize = 0x00865140;
+pub const G_JOYLOG_PLAYBACK_ADDR: usize = 0x008650D0;
 
 static HIGH_FPS_PATCHED: AtomicBool = AtomicBool::new(false);
 static PACED_FRAMES: AtomicU32 = AtomicU32::new(0);
@@ -140,6 +140,7 @@ pub extern "C" fn nfs_rust_get_contrast_mode() -> u32 {
 }
 
 #[inline]
+#[allow(dead_code)]
 unsafe fn read_f32(mem: *const u8, addr: usize) -> f32 {
     std::ptr::read_volatile(mem.add(addr) as *const f32)
 }
@@ -190,8 +191,10 @@ pub unsafe extern "C" fn nfs_rust_apply_engine_pacing(mem_base: *mut u8, real_el
     // 3. Force NTSC 60 Hz mode (0x7FB700 = 1). Prevents PAL 50 Hz lock (20 ms clamp)
     write_u32(mem_base, G_NTSC_MODE_ADDR, 1);
 
-    // 4. Expand maximum allowable frame delta multiplier (0x7FB714) to 6.0f (allows up to 100 ms)
-    write_f32(mem_base, G_MAX_FRAME_DELTA_ADDR, 6.0);
+    // 4. Keep max frame delta multiplier (0x7FB714) at 3.0f (50 ms max).
+    // At vanilla 1800 Hz tick base, 50 ms = 90 ticks which stays well inside JoyLog's
+    // 8-bit tick field (<= 255) so recorded Race Replays never overflow on frame hitches.
+    write_f32(mem_base, G_MAX_FRAME_DELTA_ADDR, 3.0);
 
     // 5. High refresh rate patch (0x0057A084: 0x75 'jne' -> 0xEB 'jmp')
     // Prevents spurious 'mov eax, 1' when frame time is under 1/60s on 90/120 Hz screens
@@ -208,30 +211,12 @@ pub unsafe extern "C" fn nfs_rust_apply_engine_pacing(mem_base: *mut u8, real_el
         write_u32(mem_base, G_HEADLIGHT_ENABLE_ADDR, 1);
     }
 
-    // 7. Trackside Crowd Suppression (0x00870CD0 = g_CrowdEnable)
-    crate::crowd::nfs_rust_apply_crowd_suppression(mem_base);
-
-    // 8. Enhanced Contrast Regulation (Issue #70: Snapdragon 8 Elite / Adreno 840 / 740)
-    // 8. Enhanced Contrast Regulation: clamp OverBright bloom to 0 to prevent TBDR tile stalls,
-    // while respecting the player's in-game Enhanced Contrast choice (G_BLEACH_BYPASS_ENABLE_ADDR)
-    write_u32(mem_base, G_OVERBRIGHT_ENABLE_ADDR, 0);
-
-    // 9. Anti-slowmotion frame pacing (supports 60Hz, 90Hz, 120Hz, 240Hz, and uncapped)
-    if real_elapsed > 0.004 && real_elapsed < 0.200 {
-        let current_wdt = read_f32(mem_base, G_SIM_WDT_ADDR);
-        let current_realdt = read_f32(mem_base, G_SIM_REALDT_ADDR);
-        let effective_dt = if current_wdt > 0.0 { current_wdt } else { current_realdt };
-
-        if effective_dt > 0.0 && effective_dt < real_elapsed * 0.90 {
-            let corrected = pacing_filter_dt(real_elapsed, effective_dt);
-            write_f32(mem_base, G_SIM_WDT_ADDR, corrected);
-            write_f32(mem_base, G_SIM_REALDT_ADDR, corrected);
-            // Scaled with 3600 Hz tick base (capped to 70 max to prevent physics death spiral during hiccups)
-            let steps = ((corrected * 3600.0) as u32).min(70);
-            write_u32(mem_base, G_SIM_STEPS_ADDR, steps);
-            PACED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    // 7. Do NOT overwrite G_SIM_WDT_ADDR (0x00865154), G_SIM_REALDT_ADDR (0x00865198),
+    // or G_SIM_STEPS_ADDR (0x00865140) outside FrameTimeUpdate (0x0057EAD0).
+    // FrameTimeUpdate already computes dt from real wall-clock QPC time and writes the exact
+    // quantized 8-bit tick count into JoyLog channel 3 during recording; mutating WorldDT/RealDT
+    // afterward causes deterministic Replay playback (0x005FA770) to desync and abort via 0x004D8020.
+    let _ = (real_elapsed, G_SIM_WDT_ADDR, G_SIM_REALDT_ADDR, G_SIM_STEPS_ADDR, G_JOYLOG_PLAYBACK_ADDR);
 
     true
 }

@@ -6,18 +6,22 @@
 #include "roam_plat.h"
 #include "roam_affinity.h"
 #include "roam_powervr.h"
+#include "../asi/asi_loader.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <math.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdbool.h>
 #include <stdatomic.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -26,7 +30,10 @@
 #include <dirent.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <limits.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <jni.h>
 #if defined(__aarch64__)
 #include <arm_neon.h>
@@ -302,11 +309,18 @@ static JavaVM         *g_jvm = NULL;
 static jclass          g_client_class = NULL;
 static jmethodID       g_mid_on_said = NULL;
 static jmethodID       g_mid_on_send = NULL;
+static jmethodID       g_mid_on_lan_udp_send = NULL;
+static jmethodID       g_mid_on_lan_udp_bind = NULL;
 static jclass          g_game_activity_class = NULL;
 static jmethodID       g_mid_toggle_settings = NULL;
 static jmethodID       g_mid_fetch_news = NULL;
 static uint32_t        g_hub_ip = 0;
+static atomic_uint     g_room_gen = 0;
+static atomic_uint     g_name_gen = 0;
+static _Atomic int     g_switch_connected = 0;
+static _Atomic uint32_t g_switch_vip = 0;
 static void            lobby_frame_tick(void);
+__attribute__((visibility("default"))) void nfs_roam_frame_tick(void);
 
 void roam_plat_lock(void)   { pthread_mutex_lock(&g_mu); }
 void roam_plat_unlock(void) { pthread_mutex_unlock(&g_mu); }
@@ -403,8 +417,22 @@ int roam_plat_test_mode(void) { return 0; }
 int roam_plat_friend(const char *json) { (void)json; return 0; }
 int roam_plat_battle(const char *json) { (void)json; return 0; }
 int roam_plat_flying(const char *json) { (void)json; return 0; }
-uint32_t roam_plat_room(char name[64]) { (void)name; return 0; }
-uint32_t roam_plat_name(char out[33]) { (void)out; return 0; }
+uint32_t roam_plat_room(char name[64]) {
+    uint32_t gen = atomic_load(&g_room_gen);
+    if (!gen) return 0;
+    roam_plat_lock();
+    snprintf(name, 64, "%s", g_room_name);
+    roam_plat_unlock();
+    return gen;
+}
+uint32_t roam_plat_name(char out[33]) {
+    uint32_t gen = atomic_load(&g_name_gen);
+    if (!gen) return 0;
+    roam_plat_lock();
+    snprintf(out, 33, "%s", g_player_name);
+    roam_plat_unlock();
+    return gen;
+}
 
 void look_eye(float *e, float *f) {
     if (g_p_mem_base && *g_p_mem_base && g_p_esp && *g_p_esp) {
@@ -680,13 +708,6 @@ __attribute__((weak)) void dispatch_patch(uint32_t a, void (*f)(CPU *)) {
 #include "roam_patches.h"
 
 static void framerate_pacing_fix(void) {
-    static int s_crowd_env_checked = 0;
-    if (!s_crowd_env_checked) {
-        s_crowd_env_checked = 1;
-        const char *env_crowd = getenv("NFSU2_CROWD");
-        int allow_crowd = (env_crowd && (strcmp(env_crowd, "1") == 0 || strcasecmp(env_crowd, "on") == 0));
-        nfs_rust_set_crowd_suppression(!allow_crowd);
-    }
     if (g_p_mem_base && *g_p_mem_base) {
         static int64_t s_last_tick_us = 0;
         int64_t now_us = roam_plat_now_us();
@@ -707,8 +728,23 @@ static void pace_frame(void) {
      * Avoid blocking nanosleep here which double-waits and starves guest background threads. */
 }
 
-static float g_stick_x = 0.f;
-static float g_stick_y = 0.f;
+static _Atomic uint32_t g_stick_x_bits = 0u;
+static _Atomic uint32_t g_stick_y_bits = 0u;
+
+static inline void roam_store_stick(float x, float y) {
+    uint32_t xb, yb;
+    memcpy(&xb, &x, sizeof(xb));
+    memcpy(&yb, &y, sizeof(yb));
+    atomic_store_explicit(&g_stick_x_bits, xb, memory_order_relaxed);
+    atomic_store_explicit(&g_stick_y_bits, yb, memory_order_relaxed);
+}
+
+static inline void roam_load_stick(float *out_x, float *out_y) {
+    uint32_t xb = atomic_load_explicit(&g_stick_x_bits, memory_order_relaxed);
+    uint32_t yb = atomic_load_explicit(&g_stick_y_bits, memory_order_relaxed);
+    memcpy(out_x, &xb, sizeof(*out_x));
+    memcpy(out_y, &yb, sizeof(*out_y));
+}
 
 /* =========================================================================
  * ARM64 Runtime Inline Hooking & Right Stick Camera / Garage Viewer Engine
@@ -731,7 +767,16 @@ static recomp_void_func_t s_orig_49b930 = NULL;
 static recomp_void_func_t s_orig_4b6510 = NULL;
 static recomp_void_func_t s_orig_49b8a0 = NULL;
 static recomp_void_func_t s_orig_49b8e0 = NULL;
+static recomp_void_func_t s_orig_600590 = NULL;
 static recomp_hook_func_t s_orig_recomp_hook = NULL;
+
+extern void roam_game_hud(void *c);
+static void hook_sub_00600590(void) {
+    if (s_orig_600590) {
+        s_orig_600590();
+    }
+    roam_game_hud(NULL);
+}
 
 typedef uint32_t (*dispatch_d3d9_func_t)(uint32_t token, const uint32_t *args, uint32_t *argumentCount);
 static dispatch_d3d9_func_t s_orig_dispatch_d3d9 = NULL;
@@ -749,6 +794,7 @@ typedef struct {
 typedef void (*configure_res_modes_fn)(void);
 typedef int (*nfs_android_res_fn)(void);
 typedef uint8_t (*wsi_get_display_mode_fn)(void *monitor, uint32_t mode_num, DxvkWsiMode *mode);
+typedef void (*widescreen_init_fn)(const char *game_root);
 typedef void (*widescreen_set_res_fn)(unsigned width, unsigned height);
 typedef void (*widescreen_apply_fps_fn)(void);
 typedef void (*set_guest_frame_limit_fn)(uint32_t fps);
@@ -756,6 +802,7 @@ typedef void (*set_guest_frame_limit_fn)(uint32_t fps);
 static configure_res_modes_fn s_orig_configure_res_modes = NULL;
 static nfs_android_res_fn s_orig_nfs_android_res = NULL;
 static wsi_get_display_mode_fn s_orig_wsi_get_display_mode = NULL;
+static widescreen_init_fn s_orig_widescreen_init = NULL;
 static widescreen_set_res_fn s_orig_widescreen_set_res = NULL;
 static widescreen_apply_fps_fn s_orig_widescreen_apply_fps = NULL;
 static set_guest_frame_limit_fn s_fn_set_guest_frame_limit = NULL;
@@ -787,7 +834,7 @@ static recomp_void_func_t arm64_inline_hook(void *target_func, void *hook_func) 
     static uint8_t *s_tramp_page = NULL;
     static size_t s_tramp_offset = 0;
     if (!s_tramp_page) {
-        s_tramp_page = (uint8_t *)mmap(NULL, 8192, PROT_READ | PROT_WRITE | PROT_EXEC,
+        s_tramp_page = (uint8_t *)mmap(NULL, 65536, PROT_READ | PROT_WRITE | PROT_EXEC,
                                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if (s_tramp_page == MAP_FAILED) {
             s_tramp_page = NULL;
@@ -795,7 +842,7 @@ static recomp_void_func_t arm64_inline_hook(void *target_func, void *hook_func) 
             return NULL;
         }
     }
-    if (s_tramp_offset + 64 > 8192) {
+    if (s_tramp_offset + 64 > 65536) {
         __android_log_print(ANDROID_LOG_ERROR, "NFSU2-Hook", "trampoline page exhausted");
         return NULL;
     }
@@ -891,8 +938,9 @@ static void hook_sub_004a5d90(void) {
         return;
     }
 
-    float x = g_stick_x;
-    float y = g_stick_y;
+    float x = 0.f;
+    float y = 0.f;
+    roam_load_stick(&x, &y);
     float r = sqrtf(x * x + y * y);
     if (r < 0.15f) {
         x = 0.f;
@@ -930,7 +978,7 @@ static void hook_sub_004a5d90(void) {
 
 #define STICK_ON     0.20f
 #define STICK_FULL   0.85f
-#define TAU_S        0.09f
+#define TAU_S        0.1385f
 #define BACK_RAD     2.4f
 #define SNAP_IN      0.44f
 #define SNAP_OUT     0.61f
@@ -952,6 +1000,7 @@ static int      s_num_cams_turned = 0;
 
 static uint32_t get_driving_car(void) {
     if (!g_p_mem_base || !*g_p_mem_base) return 0;
+    if (!rh_mem_committed(0x008654a4u, 4) || MR32(0x008654a4u) != 6u) return 0;
     if (!rh_mem_committed(0x008900ac, 4)) return 0; // SPLIT_PLAYERS_INDEX
     uint32_t pl = MR32(0x008900ac);
     if (!pl || pl >= 0x7fffffff || !rh_mem_committed(pl + 4, 4)) return 0;
@@ -984,7 +1033,8 @@ static float get_car_speed_mps(uint32_t car) {
 static float compute_stick_yaw(int can, int *back) {
     *back = 0;
     if (!can) return 0.f;
-    float x = g_stick_x, y = g_stick_y;
+    float x = 0.f, y = 0.f;
+    roam_load_stick(&x, &y);
     float r = hypotf(x, y);
     if (r < STICK_ON) return 0.f;
 
@@ -1132,8 +1182,11 @@ static void hook_sub_005c7ec0(void) {
             if (view && rh_mem_committed(view + 4, 0x40)) {
                 view_id = MR32(view + 4);
                 cam = MR32(view + 0x40);
-                if (view_id == 1u) {
-                    look_process_view(view_id, cam);
+                if (view_id == 1u || view_id == 4u) {
+                    int replay_on = (rh_mem_committed(0x008650d0u, 4) && MR32(0x008650d0u) != 0u);
+                    if (!replay_on) {
+                        look_process_view(view_id, cam);
+                    }
                 }
                 if (dd >= 30.0f && (view_id >= 1u && view_id <= 5u)) {
                     max_far = (view_id == 4u) ? 70.0f : ((view_id == 3u) ? (dd * 0.75f) : dd);
@@ -1160,30 +1213,16 @@ static void hook_sub_005c7ec0(void) {
 
     if (view_id == 1u && g_p_mem_base && *g_p_mem_base) {
         static uint32_t s_last_pacing_fc = 0;
-        static int s_crowd_checked = 0;
-        static int s_allow_crowd = 0;
-        if (!s_crowd_checked) {
-            s_crowd_checked = 1;
-            const char *env_crowd = getenv("NFSU2_CROWD");
-            s_allow_crowd = (env_crowd && (strcmp(env_crowd, "1") == 0 || strcasecmp(env_crowd, "on") == 0));
-            nfs_rust_set_crowd_suppression(!s_allow_crowd);
-        }
         uint32_t fc = rh_mem_committed(0x00870818u, 4) ? MR32(0x00870818u) : 0;
         if (fc != s_last_pacing_fc) {
             s_last_pacing_fc = fc;
             if (!s_orig_dispatch_d3d9) g_frame_count++;
             sndlead_frame_tick();
-            if (!s_allow_crowd && rh_mem_committed(0x00870cd0u, 4) && MR32(0x00870cd0u) != 0) {
-                MR32(0x00870cd0u) = 0;
-            }
             if (rh_mem_committed(0x00870cc4u, 4) && MR32(0x00870cc4u) > 1u) {
                 MR32(0x00870cc4u) = 1u;
             }
-            if (rh_mem_committed(0x00870cfcu, 4) && MR32(0x00870cfcu) != 0) {
-                MR32(0x00870cfcu) = 0;
-            }
             if (rh_mem_committed(0x007fb700u, 4)) MR32(0x007fb700u) = 1u;
-            if (rh_mem_committed(0x007fb714u, 4)) MRF32(0x007fb714u) = 6.0f;
+            if (rh_mem_committed(0x007fb714u, 4)) MRF32(0x007fb714u) = 3.0f;
         }
     }
 }
@@ -1192,7 +1231,6 @@ static void hook_sub_005caad0(void) {
     static int s_gc_checked = 0;
     static void *s_h_gc = NULL;
     static void (*s_fn_bypass)(int) = NULL;
-    static void (*s_set_contrast_active)(uint32_t) = NULL;
 
     if (!s_gc_checked) {
         s_gc_checked = 1;
@@ -1200,12 +1238,6 @@ static void hook_sub_005caad0(void) {
         if (!s_h_gc) s_h_gc = dlopen("libgraphics_cache.so", RTLD_LAZY | RTLD_GLOBAL);
         if (s_h_gc) {
             s_fn_bypass = (void (*)(int))dlsym(s_h_gc, "nfs_camera_cull_set_bypass");
-            s_set_contrast_active = (void (*)(uint32_t))dlsym(s_h_gc, "nfs_contrast_set_active");
-        }
-        if (!s_set_contrast_active) {
-            void *h_core = dlopen("libgame_core.so", RTLD_NOLOAD | RTLD_GLOBAL);
-            if (!h_core) h_core = dlopen("libgame_core.so", RTLD_LAZY | RTLD_GLOBAL);
-            if (h_core) s_set_contrast_active = (void (*)(uint32_t))dlsym(h_core, "nfs_contrast_set_active");
         }
     }
 
@@ -1227,44 +1259,8 @@ static void hook_sub_005caad0(void) {
         }
     }
 
-    int do_bypass = 1;
-
-    uint32_t user_contrast = 0;
-    if (do_bypass) {
-        uint32_t master_contrast = 0;
-        if (rh_mem_committed(0x00876518u, 4)) {
-            master_contrast = MR32(0x00876518u);
-        }
-        if (rh_mem_committed(0x00870D00u, 4)) {
-            user_contrast = MR32(0x00870D00u) | master_contrast;
-            if (s_set_contrast_active) {
-                s_set_contrast_active(user_contrast);
-            }
-            // Clamping 0x00870D00 to 0 inside scene render causes SPEED2.EXE to cleanly
-            // skip the slow 3-pass ping-pong StretchRect resolve without hooking internal functions.
-            MR32(0x00870D00u) = 0;
-        }
-        if (rh_mem_committed(0x00870CFCu, 4)) {
-            MR32(0x00870CFCu) = 0;
-        }
-        if (rh_mem_committed(0x00876514u, 4)) {
-            MR32(0x00876514u) = 0;
-        }
-    }
-
     if (s_orig_5caad0) {
         s_orig_5caad0();
-    }
-
-    if (do_bypass) {
-        // Keep engine post-processing flags clamped to 0 so SPEED2.EXE never executes
-        // the heavy 3-pass ping-pong StretchRect resolve that causes the 40 FPS drop on mobile TBDR GPUs.
-        if (rh_mem_committed(0x00870D00u, 4)) {
-            MR32(0x00870D00u) = 0;
-        }
-        if (rh_mem_committed(0x00870CFCu, 4)) {
-            MR32(0x00870CFCu) = 0;
-        }
     }
 
     if (s_fn_bypass) s_fn_bypass(0);
@@ -1972,10 +1968,14 @@ static uint32_t hook_dispatchGuestD3D9(uint32_t token, const uint32_t *args, uin
             d3d9_flush_pending_states();
             uint32_t hr = s_orig_dispatch_d3d9(token, args, argumentCount);
             if (hr == 0u) {
-                g_frame_count++;
                 s_d3d9_cache.present_frames++;
-                fe_spinners_tick();
-                lobby_frame_tick();
+                if (roam_android_init_symbols() && g_p_esp && *g_p_esp) {
+                    nfs_roam_frame_tick();
+                } else {
+                    g_frame_count++;
+                    fe_spinners_tick();
+                    lobby_frame_tick();
+                }
                 static void (*s_telemetry_present)(uint64_t) = NULL;
                 static int s_telemetry_checked = 0;
                 if (!s_telemetry_checked) {
@@ -2042,15 +2042,6 @@ static uint32_t hook_dispatchGuestD3D9(uint32_t token, const uint32_t *args, uin
                 }
             }
             return hr;
-        }
-
-        /* Clamp offscreen CreateRenderTarget (28) & CreateDepthStencilSurface (29) MSAA to NONE */
-        if ((method == 28u || method == 29u) && (args[4] != 0u || args[5] != 0u)) {
-            uint32_t args_copy[9];
-            memcpy(args_copy, args, sizeof(args_copy));
-            args_copy[4] = 0u;
-            args_copy[5] = 0u;
-            return s_orig_dispatch_d3d9(token, args_copy, argumentCount);
         }
 
         if (method == 60u) {
@@ -2611,7 +2602,7 @@ static void hook_nfs_widescreen_apply_frame_rate(void) {
     if (rh_mem_committed(0x00865558u, 4)) MRF32(0x00865558u) = 0.0f;
     if (rh_mem_committed(0x007fb710u, 8)) {
         MRF32(0x007fb710u) = 0.0f;
-        MRF32(0x007fb714u) = 6.0f;
+        MRF32(0x007fb714u) = 3.0f;
     }
     if (rh_mem_committed(0x007875bcu, 4)) MRF32(0x007875bcu) = 1.0f / 60.0f;
     if (rh_mem_committed(0x00865198u, 4) && rh_mem_committed(0x007fc858u, 4)) {
@@ -2620,24 +2611,152 @@ static void hook_nfs_widescreen_apply_frame_rate(void) {
         else if (rdt > 0.25f) rdt = 0.25f;
         MRF32(0x007fc858u) = rdt;
     }
+    if (s_lib_base && *(uint8_t *)(s_lib_base + 0x97f7300)) {
+        float *p_hud_offset = (float *)(s_lib_base + 0x97f7304);
+        if (*p_hud_offset > 106.666667f) {
+            *p_hud_offset = 106.666667f;
+        }
+    }
 }
 
 /* =========================================================================
- * Native In-Game "Advanced Options" Menu (Bottom of Display Options)
+ * Native In-Game "Advanced Options" & "Modloader" Menus (Display Options)
  * ========================================================================= */
-#define ADV_OPT_COUNT 2
+#define ADV_OPT_COUNT     2
+#define ADV_MAX_WIDGETS   24
+#define MOD_WIDGET_BASE   100
+#define MOD_MAX_UI_ITEMS  14
 
 typedef struct {
     uint32_t ptr;
     int      id;
 } AdvWidgetSlot;
 
-static uint32_t s_adv_btn_ptr = 0u;
-static int      s_adv_screen_active = 0;
-static uint32_t s_adv_screen_ptr = 0u;
-static AdvWidgetSlot s_adv_widgets[ADV_OPT_COUNT];
-static int      s_adv_widget_count = 0;
-static uint32_t s_adv_str_buf = 0u;
+typedef struct {
+    char name[128];
+    int  builtin;
+    int  enabled_cfg;
+    int  boot_enabled;
+} ModUiEntry;
+
+static uint32_t      s_adv_btn_ptr = 0u;
+static uint32_t      s_mod_btn_ptr = 0u;
+static int           s_adv_screen_active = 0; /* 0 = stock, 1 = Advanced Options, 2 = Modloader */
+static uint32_t      s_adv_screen_ptr = 0u;
+static AdvWidgetSlot s_adv_widgets[ADV_MAX_WIDGETS];
+static int           s_adv_widget_count = 0;
+static uint32_t      s_adv_str_buf = 0u;
+
+static int           s_modloader_boot_enabled = 0;
+static int           s_modloader_cfg_enabled = 0;
+static int           s_modloader_cfg_explicit = 0;
+static int           s_modloader_loaded_count = 0;
+static ModUiEntry    s_mod_ui_entries[MOD_MAX_UI_ITEMS];
+static int           s_mod_ui_count = 0;
+
+static const char *modloader_game_dir(void) {
+    const char *d = getenv("NFSU2_DATA_DIR");
+    return (d && d[0]) ? d : "/storage/emulated/0/nfsu2";
+}
+
+static int modloader_is_builtin_asi(const char *name) {
+    if (!name) return 0;
+    return (strcasecmp(name, "NFSUnderground2.WidescreenFix.asi") == 0 ||
+            strcasecmp(name, "NFSU2FreeRoam.asi") == 0);
+}
+
+static void modloader_load_state(int is_boot) {
+    const char *gdir = modloader_game_dir();
+    const char *env = getenv("NFSU2_ASI_LOADER");
+    int env_on = (env && (strcmp(env, "1") == 0 || strcasecmp(env, "on") == 0 || strcasecmp(env, "true") == 0));
+
+    s_modloader_cfg_explicit = 0;
+    s_modloader_cfg_enabled = env_on;
+    s_mod_ui_count = 0;
+
+    char scripts_dir[1024];
+    snprintf(scripts_dir, sizeof(scripts_dir), "%s/scripts", gdir);
+    DIR *dp = opendir(scripts_dir);
+    if (dp) {
+        struct dirent *de;
+        while ((de = readdir(dp)) != NULL && s_mod_ui_count < MOD_MAX_UI_ITEMS) {
+            size_t nl = strlen(de->d_name);
+            if (nl <= 4 || strcasecmp(de->d_name + nl - 4, ".asi") != 0) continue;
+            ModUiEntry *e = &s_mod_ui_entries[s_mod_ui_count++];
+            memset(e, 0, sizeof(*e));
+            snprintf(e->name, sizeof(e->name), "%s", de->d_name);
+            e->builtin = modloader_is_builtin_asi(e->name);
+            e->enabled_cfg = e->builtin ? 0 : 1;
+            e->boot_enabled = e->enabled_cfg;
+        }
+        closedir(dp);
+    }
+
+    char cfg_path[1024];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/scripts/modloader.cfg", gdir);
+    FILE *fp = fopen(cfg_path, "r");
+    if (fp) {
+        char line[512];
+        while (fgets(line, sizeof(line), fp)) {
+            char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (strncasecmp(p, "enabled=", 8) == 0) {
+                s_modloader_cfg_enabled = (atoi(p + 8) != 0) ? 1 : 0;
+                s_modloader_cfg_explicit = 1;
+            } else if (strncasecmp(p, "mod.", 4) == 0) {
+                char *eq = strchr(p + 4, '=');
+                if (eq) {
+                    *eq = '\0';
+                    int val = (atoi(eq + 1) != 0) ? 1 : 0;
+                    for (int i = 0; i < s_mod_ui_count; i++) {
+                        if (strcasecmp(s_mod_ui_entries[i].name, p + 4) == 0) {
+                            s_mod_ui_entries[i].enabled_cfg = val;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        fclose(fp);
+    }
+
+    if (is_boot) {
+        s_modloader_boot_enabled = s_modloader_cfg_enabled;
+        for (int i = 0; i < s_mod_ui_count; i++) {
+            s_mod_ui_entries[i].boot_enabled = s_mod_ui_entries[i].enabled_cfg;
+        }
+    }
+}
+
+static void modloader_save_state(void) {
+    const char *gdir = modloader_game_dir();
+    char scripts_dir[1024], cfg_path[1024];
+    snprintf(scripts_dir, sizeof(scripts_dir), "%s/scripts", gdir);
+    mkdir(scripts_dir, 0775);
+    snprintf(cfg_path, sizeof(cfg_path), "%s/scripts/modloader.cfg", gdir);
+    FILE *fp = fopen(cfg_path, "w");
+    if (!fp) return;
+    fprintf(fp, "# NFSU2 Revived Android Modloader Config\n");
+    fprintf(fp, "enabled=%d\n", s_modloader_cfg_enabled ? 1 : 0);
+    for (int i = 0; i < s_mod_ui_count; i++) {
+        fprintf(fp, "mod.%s=%d\n", s_mod_ui_entries[i].name, s_mod_ui_entries[i].enabled_cfg ? 1 : 0);
+    }
+    fclose(fp);
+}
+
+static int asi_mem_committed_cb(uint32_t va, uint32_t len) {
+    return rh_mem_committed(va, len);
+}
+
+static void hook_nfs_widescreen_init(const char *game_root) {
+    if (s_orig_widescreen_init) {
+        s_orig_widescreen_init(game_root);
+    }
+    /* ASI Modloader is disabled by default in v1.0.7 (reserved for 1.1.beta) */
+    s_modloader_boot_enabled = 0;
+    s_modloader_cfg_enabled = 0;
+    return;
+}
 
 static uint32_t adv_guest_call_direct(recomp_void_func_t target, uint32_t ecx, uint32_t edx, int n, const uint32_t *args) {
     if (!target || !g_p_mem_base || !*g_p_mem_base || !g_p_esp || *g_p_esp == 0u) return 0u;
@@ -2710,27 +2829,58 @@ static void adv_refresh_widget(uint32_t self, int id) {
     uint32_t lbl_obj = MR32(self + 0x2cu);
     uint32_t val_obj = MR32(self + 0x30u);
 
+    char label_buf[64];
     const char *label = "";
     const char *value = "";
-    switch (id) {
-        case 0:
-            label = "FPS Limit";
-            if (s_adv_cfg.fps_limit == 30) value = "30 FPS";
-            else if (s_adv_cfg.fps_limit == 60) value = "60 FPS";
-            else if (s_adv_cfg.fps_limit == 90) value = "90 FPS";
-            else if (s_adv_cfg.fps_limit == 120) value = "120 FPS";
-            else value = "Uncapped";
-            break;
-        case 1:
-            label = "Invariant Position";
-            if (s_adv_cfg.dxvk_invariant_pos == s_adv_cfg.boot_invariant_pos) {
-                value = s_adv_cfg.dxvk_invariant_pos ? "Safe (On)" : "Fast (Unsafe)";
+    if (id == MOD_WIDGET_BASE) {
+        label = "ASI Loader";
+        if (s_modloader_cfg_enabled == s_modloader_boot_enabled) {
+            value = s_modloader_cfg_enabled ? "On (Beta)" : "Off";
+        } else {
+            value = s_modloader_cfg_enabled ? "On (Restart)" : "Off (Restart)";
+        }
+    } else if (id > MOD_WIDGET_BASE) {
+        int midx = id - (MOD_WIDGET_BASE + 1);
+        if (s_mod_ui_count == 0) {
+            label = "scripts/*.asi";
+            value = "None found";
+        } else if (midx >= 0 && midx < s_mod_ui_count) {
+            ModUiEntry *e = &s_mod_ui_entries[midx];
+            snprintf(label_buf, sizeof(label_buf), "%.26s", e->name);
+            label = label_buf;
+            if (!s_modloader_boot_enabled && !e->enabled_cfg && e->builtin) {
+                value = "Built-in (Off)";
+            } else if (e->enabled_cfg == e->boot_enabled && s_modloader_boot_enabled) {
+                value = e->enabled_cfg ? "Active" : "Off";
+            } else if (e->enabled_cfg != e->boot_enabled) {
+                value = e->enabled_cfg ? "On (Restart)" : "Off (Restart)";
             } else {
-                value = s_adv_cfg.dxvk_invariant_pos ? "Safe (Restart)" : "Fast (Restart)";
+                value = e->enabled_cfg ? "On" : "Off";
             }
-            break;
-        default:
+        } else {
             return;
+        }
+    } else {
+        switch (id) {
+            case 0:
+                label = "FPS Limit";
+                if (s_adv_cfg.fps_limit == 30) value = "30 FPS";
+                else if (s_adv_cfg.fps_limit == 60) value = "60 FPS";
+                else if (s_adv_cfg.fps_limit == 90) value = "90 FPS";
+                else if (s_adv_cfg.fps_limit == 120) value = "120 FPS";
+                else value = "Uncapped";
+                break;
+            case 1:
+                label = "Invariant Position";
+                if (s_adv_cfg.dxvk_invariant_pos == s_adv_cfg.boot_invariant_pos) {
+                    value = s_adv_cfg.dxvk_invariant_pos ? "Safe (On)" : "Fast (Unsafe)";
+                } else {
+                    value = s_adv_cfg.dxvk_invariant_pos ? "Safe (Restart)" : "Fast (Restart)";
+                }
+                break;
+            default:
+                return;
+        }
     }
 
     if (lbl_obj) adv_set_fe_str(lbl_obj, label);
@@ -2742,10 +2892,12 @@ static void hook_sub_0054ee40(void) {
     uint32_t esp = g_p_esp ? *g_p_esp : 0u;
     uint32_t widget = (esp >= 0x10000u && rh_mem_committed(esp + 4u, 4)) ? MR32(esp + 4u) : 0u;
 
-    /* Insert "Advanced Options" right before "Default Settings" (vtable 0x007920a0) in Display Options */
+    /* Insert "Advanced Options" right before "Default Settings" (vtable 0x007920a0).
+     * "Modloader" button is hidden in v1.0.7 (reserved for 1.1.beta). */
     if (this_screen && widget && rh_mem_committed(widget, 4) && MR32(widget) == 0x007920a0u) {
         s_adv_screen_active = 0;
         s_adv_widget_count = 0;
+        s_mod_btn_ptr = 0u;
         uint32_t sz = 0x38u;
         uint32_t btn = adv_guest_call(0x00575620u, 0u, 0u, 1, &sz);
         if (btn && rh_mem_committed(btn, 0x38)) {
@@ -2762,10 +2914,10 @@ static void hook_sub_0054ee40(void) {
 
 static void hook_sub_0049b960(void) {
     uint32_t self = g_p_ecx ? *g_p_ecx : 0u;
-    if (self != 0u && self == s_adv_btn_ptr) {
+    if (self != 0u && (self == s_adv_btn_ptr || self == s_mod_btn_ptr)) {
         if (rh_mem_committed(self + 0x2cu, 4)) {
             uint32_t lbl = MR32(self + 0x2cu);
-            if (lbl) adv_set_fe_str(lbl, "Advanced Options");
+            if (lbl) adv_set_fe_str(lbl, (self == s_mod_btn_ptr) ? "Modloader" : "Advanced Options");
         }
         if (g_p_esp) *g_p_esp += 4u;
         return;
@@ -2778,7 +2930,9 @@ static void hook_sub_0049b930(void) {
     uint32_t esp = g_p_esp ? *g_p_esp : 0u;
     uint32_t msg = (esp >= 0x10000u && rh_mem_committed(esp + 8u, 4)) ? MR32(esp + 8u) : 0u;
     if (msg == 0x0c407210u) {
-        s_adv_screen_active = (self != 0u && self == s_adv_btn_ptr) ? 1 : 0;
+        if (self != 0u && self == s_adv_btn_ptr) s_adv_screen_active = 1;
+        else if (self != 0u && self == s_mod_btn_ptr) s_adv_screen_active = 2;
+        else s_adv_screen_active = 0;
     }
     if (s_orig_49b930) s_orig_49b930();
 }
@@ -2794,8 +2948,11 @@ static void hook_sub_004b6510(void) {
     uint32_t this_screen = g_p_ecx ? *g_p_ecx : 0u;
     s_adv_screen_ptr = this_screen;
     s_adv_widget_count = 0;
-    adv_options_load();
-    {
+
+    int ids[ADV_MAX_WIDGETS];
+    int n_ids = 0;
+    if (s_adv_screen_active == 1) {
+        adv_options_load();
         const char *env_fps = getenv("NFSU2_FPS");
         if (env_fps && *env_fps) {
             int f = atoi(env_fps);
@@ -2803,10 +2960,23 @@ static void hook_sub_004b6510(void) {
                 s_adv_cfg.fps_limit = f;
             }
         }
+        for (int id = 0; id < ADV_OPT_COUNT && n_ids < ADV_MAX_WIDGETS; id++) {
+            ids[n_ids++] = id;
+        }
+    } else if (s_adv_screen_active == 2) {
+        modloader_load_state(0);
+        ids[n_ids++] = MOD_WIDGET_BASE;
+        if (s_mod_ui_count == 0) {
+            ids[n_ids++] = MOD_WIDGET_BASE + 1;
+        } else {
+            for (int i = 0; i < s_mod_ui_count && n_ids < ADV_MAX_WIDGETS; i++) {
+                ids[n_ids++] = MOD_WIDGET_BASE + 1 + i;
+            }
+        }
     }
 
     if (this_screen) {
-        for (int id = 0; id < ADV_OPT_COUNT; id++) {
+        for (int k = 0; k < n_ids; k++) {
             uint32_t sz = 0x54u;
             uint32_t w = adv_guest_call(0x00575620u, 0u, 0u, 1, &sz);
             if (!w || !rh_mem_committed(w, 0x54)) break;
@@ -2820,7 +2990,7 @@ static void hook_sub_004b6510(void) {
             adv_guest_call(0x0051e230u, w, 0u, 5, ctor_args);
             MR32(w) = 0x00792018u; /* PCOVSync vtable */
             s_adv_widgets[s_adv_widget_count].ptr = w;
-            s_adv_widgets[s_adv_widget_count].id = id;
+            s_adv_widgets[s_adv_widget_count].id = ids[k];
             s_adv_widget_count++;
 
             uint32_t add_args[2] = { w, 1u };
@@ -2848,10 +3018,10 @@ static void hook_sub_0049b8e0(void) {
         return;
     }
 
-    if (id == 0) {
+    if (id == 0 || id == MOD_WIDGET_BASE) {
         uint32_t hdr_args[2] = { 0x0078fa8cu, 0x42adb44cu };
         uint32_t hdr_obj = adv_guest_call(0x00537a10u, 0u, 0u, 2, hdr_args);
-        if (hdr_obj) adv_set_fe_str(hdr_obj, "Advanced Options");
+        if (hdr_obj) adv_set_fe_str(hdr_obj, (id == MOD_WIDGET_BASE) ? "Modloader" : "Advanced Options");
 
         if (s_adv_screen_ptr) {
             uint32_t sb_args[3] = { 8u, (uint32_t)s_adv_widget_count, 1u };
@@ -2878,25 +3048,38 @@ static void hook_sub_0049b8a0(void) {
     else if (msg == 0x9120409eu) dir = -1;                        /* Left */
 
     if (dir != 0) {
-        switch (id) {
-            case 0: {
-                static const int kFpsOpts[5] = { 30, 60, 90, 120, 0 };
-                int idx = 1;
-                for (int i = 0; i < 5; i++) {
-                    if (kFpsOpts[i] == s_adv_cfg.fps_limit) { idx = i; break; }
-                }
-                idx = (idx + dir + 5) % 5;
-                adv_apply_fps_limit(kFpsOpts[idx]);
-                break;
+        if (id == MOD_WIDGET_BASE) {
+            s_modloader_cfg_enabled = s_modloader_cfg_enabled ? 0 : 1;
+            modloader_save_state();
+            adv_refresh_widget(self, id);
+        } else if (id > MOD_WIDGET_BASE) {
+            int midx = id - (MOD_WIDGET_BASE + 1);
+            if (midx >= 0 && midx < s_mod_ui_count) {
+                s_mod_ui_entries[midx].enabled_cfg = s_mod_ui_entries[midx].enabled_cfg ? 0 : 1;
+                modloader_save_state();
+                adv_refresh_widget(self, id);
             }
-            case 1:
-                s_adv_cfg.dxvk_invariant_pos = s_adv_cfg.dxvk_invariant_pos ? 0 : 1;
-                break;
-            default:
-                break;
+        } else {
+            switch (id) {
+                case 0: {
+                    static const int kFpsOpts[5] = { 30, 60, 90, 120, 0 };
+                    int idx = 1;
+                    for (int i = 0; i < 5; i++) {
+                        if (kFpsOpts[i] == s_adv_cfg.fps_limit) { idx = i; break; }
+                    }
+                    idx = (idx + dir + 5) % 5;
+                    adv_apply_fps_limit(kFpsOpts[idx]);
+                    break;
+                }
+                case 1:
+                    s_adv_cfg.dxvk_invariant_pos = s_adv_cfg.dxvk_invariant_pos ? 0 : 1;
+                    break;
+                default:
+                    break;
+            }
+            adv_options_save();
+            adv_refresh_widget(self, id);
         }
-        adv_options_save();
-        adv_refresh_widget(self, id);
     }
 
     if (g_p_esp) *g_p_esp += 12u; /* ret 8 */
@@ -3101,22 +3284,29 @@ static void hook_nfs_widescreen_set_resolution(unsigned width, unsigned height) 
         s_orig_widescreen_set_res(width, height);
     }
     if (!s_lib_base || !g_p_mem_base || !*g_p_mem_base || !width || !height) return;
-    if (s_display_w < 320u || s_display_h < 240u) return;
 
     uint8_t ws_enabled = *(uint8_t *)(s_lib_base + 0x97f7300);
     if (!ws_enabled) return;
 
-    float disp_aspect = (float)s_display_w / (float)s_display_h;
     float cur_aspect = (float)width / (float)height;
-    if (fabsf(cur_aspect - disp_aspect) > 0.03f) {
-        float hud_scale_x = 2.0f / (disp_aspect * 480.0f);
-        float hud_pos_x = disp_aspect * 240.0f;
-        float hud_offset = 240.0f * disp_aspect - 320.0f;
-        float dyno_x = 79.0f + ((480.0f * disp_aspect) - 640.0f) * 0.5f;
+    float target_aspect = (s_display_w >= 320u && s_display_h >= 240u)
+        ? ((float)s_display_w / (float)s_display_h)
+        : cur_aspect;
 
-        *(float *)(s_lib_base + 0x97e64bc) = disp_aspect;
+    /* Clamp .dat edge-anchor shift (s_hud_offset) to the 16:9 safe area (max 106.67)
+     * so ultrawide 20:9/21:9/22:9 screens do not push Drag HUD, tachometer, N2O,
+     * minimap, or leaderboard panels past FEng's 640-unit culling bounds. */
+    float safe_aspect = target_aspect > (16.0f / 9.0f) ? (16.0f / 9.0f) : target_aspect;
+    float safe_hud_offset = 240.0f * safe_aspect - 320.0f;
+    if (safe_hud_offset < 0.0f) safe_hud_offset = 0.0f;
+
+    if (fabsf(cur_aspect - target_aspect) > 0.03f) {
+        float hud_scale_x = 2.0f / (target_aspect * 480.0f);
+        float hud_pos_x = target_aspect * 240.0f;
+        float dyno_x = 79.0f + ((480.0f * target_aspect) - 640.0f) * 0.5f;
+
+        *(float *)(s_lib_base + 0x97e64bc) = target_aspect;
         *(float *)(s_lib_base + 0x97e64c0) = hud_pos_x;
-        *(float *)(s_lib_base + 0x97f7304) = hud_offset;
 
         MRF32(0x0079ac10u) = hud_scale_x;
         MRF32(0x00797d50u) = hud_pos_x;
@@ -3124,21 +3314,38 @@ static void hook_nfs_widescreen_set_resolution(unsigned width, unsigned height) 
         MRF32(0x007fa3c0u) = dyno_x;
         MRF32(0x007fa3c4u) = 60.0f;
     }
+
+    *(float *)(s_lib_base + 0x97f7304) = safe_hud_offset;
 }
 
 /* =========================================================================
- * Online News HTTP Interceptor (GOT hook on libnfsu2_android.so libc sockets)
- * Intercepts EA ProtoHTTP news/TOS requests on both classic and WebSocket
- * online servers and serves GameActivity.fetchNewsContent() via socketpair.
+ * Online News HTTP & Virtual Switch LAN UDP Interceptor (GOT hooks on
+ * libnfsu2_android.so libc sockets)
+ * - Intercepts EA ProtoHTTP news/TOS requests and serves GameActivity news.
+ * - Tunnels guest AF_INET/SOCK_DGRAM traffic to/from 10.77.x.y (and LAN
+ *   broadcasts when VirtualSwitch is connected) through VirtualSwitchClient.
  * ========================================================================= */
+typedef int (*lib_socket_fn)(int domain, int type, int protocol);
+typedef int (*lib_bind_fn)(int fd, const struct sockaddr *addr, socklen_t addrlen);
 typedef int (*lib_connect_fn)(int fd, const struct sockaddr *addr, socklen_t addrlen);
 typedef ssize_t (*lib_sendto_fn)(int fd, const void *buf, size_t len, int flags,
                                  const struct sockaddr *dest_addr, socklen_t addrlen);
+typedef ssize_t (*lib_recvfrom_fn)(int fd, void *buf, size_t len, int flags,
+                                   struct sockaddr *src_addr, socklen_t *addrlen);
+typedef int (*lib_poll_fn)(struct pollfd *fds, nfds_t nfds, int timeout);
+typedef int (*lib_ioctl_fn)(int fd, int request, void *argp);
+typedef int (*lib_getsockname_fn)(int fd, struct sockaddr *addr, socklen_t *addrlen);
 typedef int (*lib_close_fn)(int fd);
 
-static lib_connect_fn s_orig_lib_connect = NULL;
-static lib_sendto_fn  s_orig_lib_sendto  = NULL;
-static lib_close_fn   s_orig_lib_close   = NULL;
+static lib_socket_fn      s_orig_lib_socket      = NULL;
+static lib_bind_fn        s_orig_lib_bind        = NULL;
+static lib_connect_fn     s_orig_lib_connect     = NULL;
+static lib_sendto_fn      s_orig_lib_sendto      = NULL;
+static lib_recvfrom_fn    s_orig_lib_recvfrom    = NULL;
+static lib_poll_fn        s_orig_lib_poll        = NULL;
+static lib_ioctl_fn       s_orig_lib_ioctl       = NULL;
+static lib_getsockname_fn s_orig_lib_getsockname = NULL;
+static lib_close_fn       s_orig_lib_close       = NULL;
 
 #define HTTP_NEWS_MAX_SLOTS 32
 typedef struct {
@@ -3152,6 +3359,215 @@ typedef struct {
 static HttpNewsSlot    s_http_news_slots[HTTP_NEWS_MAX_SLOTS];
 static pthread_mutex_t s_http_news_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int     s_http_news_active = 0;
+
+#define LAN_UDP_MAX_SOCKS 64
+#define LAN_UDP_RX_CAP    128
+#define LAN_UDP_PKT_MAX   1600
+
+typedef struct {
+    uint32_t src_vip;
+    uint16_t src_port;
+    uint16_t len;
+    uint8_t  data[LAN_UDP_PKT_MAX];
+} LanUdpPkt;
+
+typedef struct {
+    int       used;
+    int       fd;
+    uint16_t  local_port;
+    uint32_t  bound_vip;
+    uint32_t  peer_vip;
+    uint16_t  peer_port;
+    int       q_head;
+    int       q_tail;
+    int       q_count;
+    LanUdpPkt q[LAN_UDP_RX_CAP];
+} LanUdpSock;
+
+static LanUdpSock      s_lan_socks[LAN_UDP_MAX_SOCKS];
+static pthread_mutex_t s_lan_mu = PTHREAD_MUTEX_INITIALIZER;
+static int             s_lan_wake_fd = -1;
+static uint16_t        s_lan_wake_port = 0;
+
+static inline int lan_is_virtual_dst(uint32_t ip_h, uint16_t dport) {
+    if (dport == 47210u || dport == 47211u || dport == 9999u) return 0;
+    if ((ip_h & 0xFFFF0000u) == 0x0A4D0000u) return 1;
+    if (ip_h == 0xFFFFFFFFu && atomic_load_explicit(&g_switch_connected, memory_order_acquire)) return 1;
+    return 0;
+}
+
+static void lan_ensure_wake_fd_locked(void) {
+    if (s_lan_wake_fd >= 0) return;
+    int wfd = s_orig_lib_socket
+        ? s_orig_lib_socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)
+        : socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (wfd < 0) return;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    int rc = s_orig_lib_bind
+        ? s_orig_lib_bind(wfd, (struct sockaddr *)&sa, sizeof sa)
+        : bind(wfd, (struct sockaddr *)&sa, sizeof sa);
+    if (rc == 0) {
+        socklen_t al = sizeof sa;
+        int g = s_orig_lib_getsockname
+            ? s_orig_lib_getsockname(wfd, (struct sockaddr *)&sa, &al)
+            : getsockname(wfd, (struct sockaddr *)&sa, &al);
+        if (g == 0) {
+            s_lan_wake_port = ntohs(sa.sin_port);
+        }
+        s_lan_wake_fd = wfd;
+    } else {
+        if (s_orig_lib_close) s_orig_lib_close(wfd);
+        else close(wfd);
+    }
+}
+
+static LanUdpSock *lan_find_by_fd_locked(int fd) {
+    if (fd < 0) return NULL;
+    for (int i = 0; i < LAN_UDP_MAX_SOCKS; i++) {
+        if (s_lan_socks[i].used && s_lan_socks[i].fd == fd) {
+            return &s_lan_socks[i];
+        }
+    }
+    return NULL;
+}
+
+static LanUdpSock *lan_find_by_port_locked(uint16_t dport) {
+    if (dport == 0) return NULL;
+    for (int i = 0; i < LAN_UDP_MAX_SOCKS; i++) {
+        if (s_lan_socks[i].used && s_lan_socks[i].local_port == dport) {
+            return &s_lan_socks[i];
+        }
+    }
+    return NULL;
+}
+
+static void lan_send_wake_locked(uint16_t dport) {
+    if (dport == 0) return;
+    lan_ensure_wake_fd_locked();
+    if (s_lan_wake_fd < 0) return;
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof dst);
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    dst.sin_port = htons(dport);
+    uint8_t wake = 'W';
+    if (s_orig_lib_sendto) {
+        s_orig_lib_sendto(s_lan_wake_fd, &wake, 1, MSG_DONTWAIT, (struct sockaddr *)&dst, sizeof dst);
+    } else {
+        sendto(s_lan_wake_fd, &wake, 1, MSG_DONTWAIT, (struct sockaddr *)&dst, sizeof dst);
+    }
+}
+
+static void lan_drain_wake_locked(int fd) {
+    char tmp[16];
+    if (s_orig_lib_recvfrom) {
+        s_orig_lib_recvfrom(fd, tmp, sizeof tmp, MSG_DONTWAIT, NULL, NULL);
+    } else {
+        recvfrom(fd, tmp, sizeof tmp, MSG_DONTWAIT, NULL, NULL);
+    }
+}
+
+static uint16_t lan_query_local_port(int fd) {
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    socklen_t sl = sizeof sa;
+    int rc = s_orig_lib_getsockname
+        ? s_orig_lib_getsockname(fd, (struct sockaddr *)&sa, &sl)
+        : getsockname(fd, (struct sockaddr *)&sa, &sl);
+    if (rc == 0 && sa.sin_family == AF_INET) {
+        return ntohs(sa.sin_port);
+    }
+    return 0;
+}
+
+static void lan_notify_java_bind(uint16_t port) {
+    if (port == 0 || port == 47210u || port == 47211u || port == 9999u) return;
+    if (!g_jvm || !g_client_class) return;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    jint res = (*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6);
+    if (res == JNI_EDETACHED) {
+        if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) == 0) attached = 1;
+        else env = NULL;
+    } else if (res != JNI_OK) {
+        env = NULL;
+    }
+    if (!env) return;
+    if (!g_mid_on_lan_udp_bind) {
+        g_mid_on_lan_udp_bind = (*env)->GetStaticMethodID(env, g_client_class, "onNativeLanUdpBind", "(I)V");
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            g_mid_on_lan_udp_bind = NULL;
+        }
+    }
+    if (g_mid_on_lan_udp_bind) {
+        (*env)->CallStaticVoidMethod(env, g_client_class, g_mid_on_lan_udp_bind, (jint)port);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
+    if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
+}
+
+static void lan_udp_send_to_java(uint32_t dst_vip, uint16_t sport, uint16_t dport,
+                                 const void *buf, size_t len) {
+    if (!g_jvm || !g_client_class || !buf || len == 0) return;
+    JNIEnv *env = NULL;
+    int attached = 0;
+    jint res = (*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6);
+    if (res == JNI_EDETACHED) {
+        if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) == 0) attached = 1;
+        else env = NULL;
+    } else if (res != JNI_OK) {
+        env = NULL;
+    }
+    if (!env) return;
+    if (!g_mid_on_lan_udp_send) {
+        g_mid_on_lan_udp_send = (*env)->GetStaticMethodID(env, g_client_class, "onNativeLanUdpSend", "(III[B)V");
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            g_mid_on_lan_udp_send = NULL;
+        }
+    }
+    if (g_mid_on_lan_udp_send) {
+        jsize jlen = (jsize)(len > 65535u ? 65535u : len);
+        jbyteArray jData = (*env)->NewByteArray(env, jlen);
+        if (jData) {
+            (*env)->SetByteArrayRegion(env, jData, 0, jlen, (const jbyte *)buf);
+            (*env)->CallStaticVoidMethod(env, g_client_class, g_mid_on_lan_udp_send,
+                                         (jint)dst_vip, (jint)sport, (jint)dport, jData);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, jData);
+        }
+    }
+    if (attached) (*g_jvm)->DetachCurrentThread(g_jvm);
+}
+
+static void lan_enqueue_rx(uint32_t src_vip, uint16_t sport, uint16_t dport,
+                           const uint8_t *data, size_t len) {
+    if (!data || len == 0 || len > LAN_UDP_PKT_MAX || dport == 0) return;
+    pthread_mutex_lock(&s_lan_mu);
+    LanUdpSock *s = lan_find_by_port_locked(dport);
+    if (s) {
+        if (s->q_count >= LAN_UDP_RX_CAP) {
+            s->q_head = (s->q_head + 1) % LAN_UDP_RX_CAP;
+            s->q_count--;
+            lan_drain_wake_locked(s->fd);
+        }
+        LanUdpPkt *pkt = &s->q[s->q_tail];
+        pkt->src_vip = src_vip;
+        pkt->src_port = sport;
+        pkt->len = (uint16_t)len;
+        memcpy(pkt->data, data, len);
+        s->q_tail = (s->q_tail + 1) % LAN_UDP_RX_CAP;
+        s->q_count++;
+        lan_send_wake_locked(s->local_port);
+    }
+    pthread_mutex_unlock(&s_lan_mu);
+}
 
 static char *news_fetch_from_java(void) {
     static const char kFallbackNews[] =
@@ -3202,11 +3618,134 @@ static char *news_fetch_from_java(void) {
     return fb;
 }
 
+static int hook_lib_socket(int domain, int type, int protocol) {
+    int fd = s_orig_lib_socket
+        ? s_orig_lib_socket(domain, type, protocol)
+        : socket(domain, type, protocol);
+    if (fd >= 0 && domain == AF_INET && (type & 0x0f) == SOCK_DGRAM) {
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (!slot) {
+            for (int i = 0; i < LAN_UDP_MAX_SOCKS; i++) {
+                if (!s_lan_socks[i].used) {
+                    slot = &s_lan_socks[i];
+                    break;
+                }
+            }
+        }
+        if (slot) {
+            memset(slot, 0, sizeof *slot);
+            slot->used = 1;
+            slot->fd = fd;
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
+    return fd;
+}
+
+static int hook_lib_bind(int fd, const struct sockaddr *addr, socklen_t addrlen) {
+    struct sockaddr_in rewritten;
+    const struct sockaddr *use_addr = addr;
+    socklen_t use_len = addrlen;
+    uint32_t req_ip = 0;
+    uint16_t req_port = 0;
+    int is_udp_inet = 0;
+
+    if (fd >= 0 && addr && addrlen >= (socklen_t)sizeof(struct sockaddr_in) &&
+        addr->sa_family == AF_INET) {
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        is_udp_inet = (slot != NULL);
+        pthread_mutex_unlock(&s_lan_mu);
+
+        if (is_udp_inet) {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+            req_ip = ntohl(in->sin_addr.s_addr);
+            req_port = ntohs(in->sin_port);
+            int sw = atomic_load_explicit(&g_switch_connected, memory_order_acquire);
+            if ((req_ip & 0xFFFF0000u) == 0x0A4D0000u ||
+                (sw && req_port != 47210u && req_port != 47211u)) {
+                memset(&rewritten, 0, sizeof rewritten);
+                rewritten.sin_family = AF_INET;
+                rewritten.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                rewritten.sin_port = in->sin_port;
+                int reuse = 1;
+                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
+                use_addr = (const struct sockaddr *)&rewritten;
+                use_len = (socklen_t)sizeof rewritten;
+            }
+        }
+    }
+
+    int rc = s_orig_lib_bind
+        ? s_orig_lib_bind(fd, use_addr, use_len)
+        : bind(fd, use_addr, use_len);
+
+    if (rc == 0 && is_udp_inet) {
+        uint16_t actual_port = lan_query_local_port(fd);
+        if (actual_port == 0) actual_port = req_port;
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot) {
+            slot->local_port = actual_port;
+            if ((req_ip & 0xFFFF0000u) == 0x0A4D0000u) {
+                slot->bound_vip = req_ip;
+            }
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+        lan_notify_java_bind(actual_port);
+    }
+    return rc;
+}
+
 static int hook_lib_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
+    if (fd >= 0 && addr && addr->sa_family == AF_UNSPEC) {
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot) {
+            slot->peer_vip = 0;
+            slot->peer_port = 0;
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
     if (fd > 0 && addr && addrlen >= (socklen_t)sizeof(struct sockaddr_in) &&
         addr->sa_family == AF_INET) {
         const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+        uint32_t ip_h = ntohl(in->sin_addr.s_addr);
         uint16_t port = ntohs(in->sin_port);
+
+        if (lan_is_virtual_dst(ip_h, port)) {
+            int handled_udp = 0;
+            uint16_t need_notify = 0;
+            pthread_mutex_lock(&s_lan_mu);
+            LanUdpSock *slot = lan_find_by_fd_locked(fd);
+            if (slot) {
+                if (slot->local_port == 0) {
+                    struct sockaddr_in lo;
+                    memset(&lo, 0, sizeof lo);
+                    lo.sin_family = AF_INET;
+                    lo.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                    lo.sin_port = 0;
+                    int brc = s_orig_lib_bind
+                        ? s_orig_lib_bind(fd, (struct sockaddr *)&lo, sizeof lo)
+                        : bind(fd, (struct sockaddr *)&lo, sizeof lo);
+                    if (brc == 0) {
+                        slot->local_port = lan_query_local_port(fd);
+                        need_notify = slot->local_port;
+                    }
+                }
+                slot->peer_vip = ip_h;
+                slot->peer_port = port;
+                handled_udp = 1;
+            }
+            pthread_mutex_unlock(&s_lan_mu);
+            if (need_notify) lan_notify_java_bind(need_notify);
+            if (handled_udp) {
+                errno = 0;
+                return 0;
+            }
+        }
+
         if (port == 80u || port == 8080u || port == 3000u || port == 9900u) {
             int stype = 0;
             socklen_t sl = (socklen_t)sizeof(stype);
@@ -3385,12 +3924,214 @@ static ssize_t hook_lib_sendto(int fd, const void *buf, size_t len, int flags,
             return (ssize_t)len;
         }
     }
+    if (fd >= 0 && buf && len > 0) {
+        uint32_t dst_vip = 0;
+        uint16_t dport = 0;
+        if (dest_addr && addrlen >= (socklen_t)sizeof(struct sockaddr_in) &&
+            dest_addr->sa_family == AF_INET) {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)dest_addr;
+            dst_vip = ntohl(in->sin_addr.s_addr);
+            dport = ntohs(in->sin_port);
+        }
+
+        int is_lan_udp = 0;
+        uint16_t sport = 0;
+        uint16_t bound_new = 0;
+
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot) {
+            if (dst_vip == 0) {
+                dst_vip = slot->peer_vip;
+                dport = slot->peer_port;
+            }
+            if (dport != 0 && lan_is_virtual_dst(dst_vip, dport)) {
+                is_lan_udp = 1;
+                if (slot->local_port == 0) {
+                    struct sockaddr_in lo;
+                    memset(&lo, 0, sizeof lo);
+                    lo.sin_family = AF_INET;
+                    lo.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                    lo.sin_port = 0;
+                    int brc = s_orig_lib_bind
+                        ? s_orig_lib_bind(fd, (struct sockaddr *)&lo, sizeof lo)
+                        : bind(fd, (struct sockaddr *)&lo, sizeof lo);
+                    if (brc == 0) {
+                        slot->local_port = lan_query_local_port(fd);
+                        bound_new = slot->local_port;
+                    }
+                }
+                sport = slot->local_port;
+            }
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+
+        if (bound_new) lan_notify_java_bind(bound_new);
+
+        if (is_lan_udp) {
+            if (!sport) sport = dport;
+            uint32_t my_vip = atomic_load_explicit(&g_switch_vip, memory_order_acquire);
+            if (my_vip != 0 && dst_vip == my_vip) {
+                lan_enqueue_rx(my_vip, sport, dport, (const uint8_t *)buf, len);
+            } else {
+                lan_udp_send_to_java(dst_vip, sport, dport, buf, len);
+            }
+            errno = 0;
+            return (ssize_t)len;
+        }
+    }
     return s_orig_lib_sendto
         ? s_orig_lib_sendto(fd, buf, len, flags, dest_addr, addrlen)
         : sendto(fd, buf, len, flags, dest_addr, addrlen);
 }
 
+static ssize_t hook_lib_recvfrom(int fd, void *buf, size_t len, int flags,
+                                 struct sockaddr *src_addr, socklen_t *addrlen) {
+    if (fd >= 0) {
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot && slot->q_count > 0) {
+            LanUdpPkt *pkt = &slot->q[slot->q_head];
+            size_t full_len = pkt->len;
+            size_t copy_n = (len < full_len) ? len : full_len;
+            if (buf && copy_n > 0) {
+                memcpy(buf, pkt->data, copy_n);
+            }
+            if (src_addr && addrlen && *addrlen >= (socklen_t)sizeof(struct sockaddr_in)) {
+                struct sockaddr_in *out_in = (struct sockaddr_in *)src_addr;
+                memset(out_in, 0, sizeof *out_in);
+                out_in->sin_family = AF_INET;
+                out_in->sin_port = htons(pkt->src_port);
+                out_in->sin_addr.s_addr = htonl(pkt->src_vip);
+                *addrlen = (socklen_t)sizeof(struct sockaddr_in);
+            }
+            if (!(flags & MSG_PEEK)) {
+                slot->q_head = (slot->q_head + 1) % LAN_UDP_RX_CAP;
+                slot->q_count--;
+                lan_drain_wake_locked(fd);
+            }
+            pthread_mutex_unlock(&s_lan_mu);
+            errno = 0;
+            return (ssize_t)((flags & MSG_TRUNC) ? full_len : copy_n);
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
+
+    for (;;) {
+        struct sockaddr_in peek_from;
+        socklen_t peek_fl = (socklen_t)sizeof peek_from;
+        struct sockaddr *use_sa = src_addr ? src_addr : (struct sockaddr *)&peek_from;
+        socklen_t *use_sl = addrlen ? addrlen : &peek_fl;
+        socklen_t saved_sl = *use_sl;
+        ssize_t n = s_orig_lib_recvfrom
+            ? s_orig_lib_recvfrom(fd, buf, len, flags, use_sa, use_sl)
+            : recvfrom(fd, buf, len, flags, use_sa, use_sl);
+        if (n == 1 && use_sa->sa_family == AF_INET && s_lan_wake_port != 0) {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)use_sa;
+            if (in->sin_addr.s_addr == htonl(INADDR_LOOPBACK) &&
+                in->sin_port == htons(s_lan_wake_port)) {
+                *use_sl = saved_sl;
+                continue;
+            }
+        }
+        return n;
+    }
+}
+
+static int hook_lib_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    if (fds && nfds > 0) {
+        int ready = 0;
+        pthread_mutex_lock(&s_lan_mu);
+        for (nfds_t i = 0; i < nfds; i++) {
+            fds[i].revents = 0;
+            if (fds[i].fd >= 0 && (fds[i].events & POLLIN)) {
+                LanUdpSock *s = lan_find_by_fd_locked(fds[i].fd);
+                if (s && s->q_count > 0) {
+                    fds[i].revents |= POLLIN;
+                    ready++;
+                }
+            }
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+        if (ready > 0) return ready;
+    }
+
+    int rc = s_orig_lib_poll ? s_orig_lib_poll(fds, nfds, timeout) : poll(fds, nfds, timeout);
+    if (rc >= 0 && fds && nfds > 0) {
+        pthread_mutex_lock(&s_lan_mu);
+        for (nfds_t i = 0; i < nfds; i++) {
+            if (fds[i].fd >= 0 && (fds[i].events & POLLIN)) {
+                LanUdpSock *s = lan_find_by_fd_locked(fds[i].fd);
+                if (s && s->q_count > 0 && !(fds[i].revents & POLLIN)) {
+                    fds[i].revents |= POLLIN;
+                    rc++;
+                }
+            }
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
+    return rc;
+}
+
+static int hook_lib_ioctl(int fd, int request, ...) {
+    va_list ap;
+    va_start(ap, request);
+    void *argp = va_arg(ap, void *);
+    va_end(ap);
+
+    if (fd >= 0 && ((unsigned int)request == (unsigned int)FIONREAD) && argp) {
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot && slot->q_count > 0) {
+            *(int *)argp = (int)slot->q[slot->q_head].len;
+            pthread_mutex_unlock(&s_lan_mu);
+            errno = 0;
+            return 0;
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
+    return s_orig_lib_ioctl
+        ? s_orig_lib_ioctl(fd, request, argp)
+        : ioctl(fd, request, argp);
+}
+
+static int hook_lib_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen) {
+    int rc = s_orig_lib_getsockname
+        ? s_orig_lib_getsockname(fd, addr, addrlen)
+        : getsockname(fd, addr, addrlen);
+    if (rc == 0 && fd >= 0 && addr && addrlen &&
+        *addrlen >= (socklen_t)sizeof(struct sockaddr_in) &&
+        addr->sa_family == AF_INET) {
+        uint32_t my_vip = atomic_load_explicit(&g_switch_vip, memory_order_acquire);
+        int sw = atomic_load_explicit(&g_switch_connected, memory_order_acquire);
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot) {
+            struct sockaddr_in *in = (struct sockaddr_in *)addr;
+            if (slot->bound_vip != 0) {
+                in->sin_addr.s_addr = htonl(slot->bound_vip);
+            } else if (sw && my_vip != 0 &&
+                       (in->sin_addr.s_addr == 0 || in->sin_addr.s_addr == htonl(INADDR_LOOPBACK))) {
+                in->sin_addr.s_addr = htonl(my_vip);
+            }
+            if (slot->local_port != 0) {
+                in->sin_port = htons(slot->local_port);
+            }
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
+    return rc;
+}
+
 static int hook_lib_close(int fd) {
+    if (fd >= 0) {
+        pthread_mutex_lock(&s_lan_mu);
+        LanUdpSock *slot = lan_find_by_fd_locked(fd);
+        if (slot) {
+            memset(slot, 0, sizeof *slot);
+        }
+        pthread_mutex_unlock(&s_lan_mu);
+    }
     if (atomic_load_explicit(&s_http_news_active, memory_order_relaxed) > 0 && fd >= 0) {
         int peer_fd = -1;
         pthread_mutex_lock(&s_http_news_mu);
@@ -3880,6 +4621,20 @@ static void roam_android_install_hooks(void) {
         __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x00483b40]");
     }
 
+    // 6. sub_00600590 (Player::Update HUD step -> roam_game_hud player tags)
+    void *target_60 = g_p_recomp_lookup ? (void *)g_p_recomp_lookup(0x00600590u) : NULL;
+    if (target_60 && !s_orig_600590) {
+        s_orig_600590 = (recomp_void_func_t)arm64_inline_hook(target_60, (void *)hook_sub_00600590);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Hooked sub_00600590 (Player HUD -> roam_game_hud) at %p (orig: %p)", target_60, s_orig_600590);
+    }
+    uintptr_t k_60 = lib_base + 0x979da90;
+    if (*(uint32_t *)k_60 == 0x00600590u) {
+        uintptr_t page = k_60 & ~((uintptr_t)page_sz - 1);
+        mprotect((void *)page, page_sz * 2, PROT_READ | PROT_WRITE);
+        *(void **)(k_60 + 8) = (void *)hook_sub_00600590;
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook", "Updated k_functions[0x00600590]");
+    }
+
     // Patch GOT slot for recomp_hook so PLT jumps directly to our hook
     uintptr_t got_recomp_hook = lib_base + 0x97dd4a8;
     uintptr_t got_page = got_recomp_hook & ~((uintptr_t)page_sz - 1);
@@ -3973,7 +4728,7 @@ static void roam_android_install_hooks(void) {
     }
 #endif
 
-    // Hook libnfsu2_android.so libc socket GOT slots (connect/sendto/close) for Online News HTTP responder
+    // Hook libnfsu2_android.so libc socket GOT slots (HTTP News + Virtual Switch LAN UDP)
     {
         struct {
             const char *name;
@@ -3981,9 +4736,15 @@ static void roam_android_install_hooks(void) {
             void *hook;
             void **orig_out;
         } net_got_hooks[] = {
-            { "connect", 0x97ddba8u, (void *)hook_lib_connect, (void **)&s_orig_lib_connect },
-            { "sendto",  0x97ddbe8u, (void *)hook_lib_sendto,  (void **)&s_orig_lib_sendto },
-            { "close",   0x97ddb50u, (void *)hook_lib_close,   (void **)&s_orig_lib_close },
+            { "socket",      0x97ddc00u, (void *)hook_lib_socket,      (void **)&s_orig_lib_socket },
+            { "bind",        0x97ddb90u, (void *)hook_lib_bind,        (void **)&s_orig_lib_bind },
+            { "connect",     0x97ddba8u, (void *)hook_lib_connect,     (void **)&s_orig_lib_connect },
+            { "sendto",      0x97ddbe8u, (void *)hook_lib_sendto,      (void **)&s_orig_lib_sendto },
+            { "recvfrom",    0x97ddbc8u, (void *)hook_lib_recvfrom,    (void **)&s_orig_lib_recvfrom },
+            { "poll",        0x97ddbd8u, (void *)hook_lib_poll,        (void **)&s_orig_lib_poll },
+            { "ioctl",       0x97ddbb8u, (void *)hook_lib_ioctl,       (void **)&s_orig_lib_ioctl },
+            { "getsockname", 0x97ddbd0u, (void *)hook_lib_getsockname, (void **)&s_orig_lib_getsockname },
+            { "close",       0x97ddb50u, (void *)hook_lib_close,       (void **)&s_orig_lib_close },
         };
         for (size_t i = 0; i < sizeof(net_got_hooks) / sizeof(net_got_hooks[0]); i++) {
             if (*net_got_hooks[i].orig_out) continue;
@@ -4047,6 +4808,8 @@ static void roam_android_install_hooks(void) {
           (void *)hook_nfs_android_resolution, (void **)&s_orig_nfs_android_res },
         { "_ZN4dxvk3wsi14getDisplayModeEPvjPNS0_7WsiModeE", 0x97df030u,
           (void *)hook_wsi_getDisplayMode, (void **)&s_orig_wsi_get_display_mode },
+        { "nfs_widescreen_init", 0x97ddd28u,
+          (void *)hook_nfs_widescreen_init, (void **)&s_orig_widescreen_init },
         { "nfs_widescreen_set_resolution", 0x97ddd08u,
           (void *)hook_nfs_widescreen_set_resolution, (void **)&s_orig_widescreen_set_res },
         { "nfs_widescreen_apply_frame_rate", 0x97ddc90u,
@@ -4162,17 +4925,6 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
         nfs_bind_to_perf_cores();
     }
     g_frame_count++;
-    static uint64_t s_last_tick_ns = 0;
-    struct timespec ts_tick;
-    clock_gettime(CLOCK_MONOTONIC, &ts_tick);
-    uint64_t now_tick_ns = (uint64_t)ts_tick.tv_sec * 1000000000ULL + (uint64_t)ts_tick.tv_nsec;
-    if (s_last_tick_ns > 0 && now_tick_ns > s_last_tick_ns) {
-        uint64_t tick_dur_ns = now_tick_ns - s_last_tick_ns;
-        static void(*s_metrics_record_roam)(uint64_t) = NULL;
-        if (!s_metrics_record_roam) s_metrics_record_roam = (void(*)(uint64_t))dlsym(RTLD_DEFAULT, "nfs_metrics_record_frame");
-        if (s_metrics_record_roam) s_metrics_record_roam(tick_dur_ns);
-    }
-    s_last_tick_ns = now_tick_ns;
     hiddenraces_frame_tick();
     extraoptions_frame_tick();
     garage_frame_tick();
@@ -4184,7 +4936,33 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
     lobby_frame_tick();
     framerate_pacing_fix();
     resolution_frame_tick();
-    look_camera_frame_tick();
+    int replay_active = (g_p_mem_base && *g_p_mem_base &&
+                         rh_mem_committed(0x008650d0u, 4) && MR32(0x008650d0u) != 0u);
+    if (g_p_mem_base && *g_p_mem_base && rh_mem_committed(0x008650b8u, 4)) {
+        static int s_last_replay_active = -1;
+        static uint32_t s_last_replay_scr = 0xFFFFFFFFu;
+        static uint32_t s_last_replay_bad = 0xFFFFFFFFu;
+        uint32_t rec = MR32(0x008650b8u);
+        uint32_t scr = rh_mem_committed(0x008363ecu, 4) ? MR32(0x008363ecu) : 0u;
+        uint32_t bad = (rec && rh_mem_committed(rec + 0x0cu, 4)) ? MR32(rec + 0x0cu) : 0u;
+        if (replay_active != s_last_replay_active || (scr != 0u) != (s_last_replay_scr != 0u) || bad != s_last_replay_bad) {
+            uint32_t rec_on = (rec && rh_mem_committed(rec + 0x50ecu, 1)) ? MR8(rec + 0x50ecu) : 0u;
+            uint32_t rec_f = (rec && rh_mem_committed(rec + 0xb8u, 4)) ? MR32(rec + 0xb8u) : 0u;
+            uint32_t rec_s = (rec && rh_mem_committed(rec + 0xbcu, 4)) ? MR32(rec + 0xbcu) : 0u;
+            uint32_t wt = rh_mem_committed(0x0086518cu, 4) ? MR32(0x0086518cu) : 0u;
+            uint32_t ticks = rh_mem_committed(0x00865140u, 4) ? MR32(0x00865140u) : 0u;
+            float wdt = rh_mem_committed(0x00865154u, 4) ? MRF32(0x00865154u) : 0.0f;
+            __android_log_print(ANDROID_LOG_INFO, "NFSU2-Replay",
+                "state playback=%d ui=0x%08x rec=0x%08x on=%u frames=%u snaps=%u bad=%u ticks=%u wdt=%.5f wt=%u",
+                replay_active, scr, rec, rec_on, rec_f, rec_s, bad, ticks, wdt, wt);
+            s_last_replay_active = replay_active;
+            s_last_replay_scr = scr;
+            s_last_replay_bad = bad;
+        }
+    }
+    if (!replay_active) {
+        look_camera_frame_tick();
+    }
     fe_spinners_tick();
     static int s_gamepad_hooked_tick = 0;
     if (!s_gamepad_hooked_tick) {
@@ -4207,14 +4985,15 @@ __attribute__((visibility("default"))) void nfs_roam_frame_tick(void) {
         }
     }
     if (s_gpu_gov_tick) s_gpu_gov_tick(is_gameplay);
-    roam_game_frame(NULL);
+    if (!replay_active) {
+        roam_game_frame(NULL);
+    }
     atomic_store(&s_tick_in_progress, 0);
 }
 
 /* Gamepad Right Stick Quick Chat Input & Camera Look */
 void roam_stick_input(float x, float y) {
-    g_stick_x = x;
-    g_stick_y = y;
+    roam_store_stick(x, y);
     if (!g_hooks_installed) {
         roam_android_init_symbols();
         roam_android_install_hooks();
@@ -4266,7 +5045,13 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
         if (clz) {
             g_client_class = (jclass)(*env)->NewGlobalRef(env, clz);
             g_mid_on_said = (*env)->GetStaticMethodID(env, g_client_class, "onQuickChatReceived", "(Ljava/lang/String;)V");
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); g_mid_on_said = NULL; }
             g_mid_on_send = (*env)->GetStaticMethodID(env, g_client_class, "onNativeSend", "(II[B)V");
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); g_mid_on_send = NULL; }
+            g_mid_on_lan_udp_send = (*env)->GetStaticMethodID(env, g_client_class, "onNativeLanUdpSend", "(III[B)V");
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); g_mid_on_lan_udp_send = NULL; }
+            g_mid_on_lan_udp_bind = (*env)->GetStaticMethodID(env, g_client_class, "onNativeLanUdpBind", "(I)V");
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); g_mid_on_lan_udp_bind = NULL; }
             (*env)->DeleteLocalRef(env, clz);
         }
         jclass ga_clz = (*env)->FindClass(env, "io/mininxd/nfsu2/GameActivity");
@@ -4292,29 +5077,52 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
 }
 
 static void roam_do_configure(JNIEnv *env, jstring jRoom, jstring jName, jstring jPeers, jboolean jGhostMode, jint jHubIp) {
+    roam_plat_lock();
     g_ghost_mode = (jGhostMode == JNI_TRUE) ? 1 : 0;
     g_hub_ip = (uint32_t)jHubIp;
-    if (g_s && g_hub_ip) {
-        roam_plat_lock();
+    if (env) {
+        if (jRoom) {
+            const char *r = (*(JNIEnv **)env != NULL) ? (*env)->GetStringUTFChars(env, jRoom, NULL) : NULL;
+            if (r) {
+                snprintf(g_room_name, sizeof g_room_name, "%s", r);
+                (*env)->ReleaseStringUTFChars(env, jRoom, r);
+            }
+        }
+        if (jName) {
+            const char *n = (*(JNIEnv **)env != NULL) ? (*env)->GetStringUTFChars(env, jName, NULL) : NULL;
+            if (n) {
+                snprintf(g_player_name, sizeof g_player_name, "%s", n);
+                (*env)->ReleaseStringUTFChars(env, jName, n);
+            }
+        }
+        if (jPeers) {
+            const char *p = (*(JNIEnv **)env != NULL) ? (*env)->GetStringUTFChars(env, jPeers, NULL) : NULL;
+            if (p) {
+                snprintf(g_peers_str, sizeof g_peers_str, "%s", p);
+                (*env)->ReleaseStringUTFChars(env, jPeers, p);
+            }
+        }
+    }
+    atomic_fetch_add(&g_room_gen, 1u);
+    atomic_fetch_add(&g_name_gen, 1u);
+    if (g_s) {
         g_s->conf.hub_ip = g_hub_ip;
-        g_s->conf.hub_port = 47210;
+        g_s->conf.hub_port = g_hub_ip ? 47210 : 0;
         g_s->conf.snap_states = 1;
+        rc_name_clean(g_s->conf.name, g_player_name, RC_NAME_MAX + 1);
+        rc_set_room(g_s, rc_room_hash(g_room_name));
         g_s->hub_hello_tx = INT64_MIN / 4;
-        roam_plat_unlock();
+        if (!g_hub_ip && g_peers_str[0]) {
+            uint32_t pips[16];
+            uint16_t ppts[16];
+            int np = roam_plat_parse_peers(g_peers_str, 0, g_s->conf.port ? g_s->conf.port : 47210, pips, ppts, 16);
+            int64_t now = roam_plat_now_us();
+            for (int i = 0; i < np; i++) {
+                rc_add_peer(g_s, pips[i], ppts[i], 1, now);
+            }
+        }
     }
-    if (!env) return;
-    if (jRoom) {
-        const char *r = (*(JNIEnv **)env != NULL) ? (*env)->GetStringUTFChars(env, jRoom, NULL) : NULL;
-        if (r) { strncpy(g_room_name, r, sizeof g_room_name - 1); (*env)->ReleaseStringUTFChars(env, jRoom, r); }
-    }
-    if (jName) {
-        const char *n = (*(JNIEnv **)env != NULL) ? (*env)->GetStringUTFChars(env, jName, NULL) : NULL;
-        if (n) { strncpy(g_player_name, n, sizeof g_player_name - 1); (*env)->ReleaseStringUTFChars(env, jName, n); }
-    }
-    if (jPeers) {
-        const char *p = (*(JNIEnv **)env != NULL) ? (*env)->GetStringUTFChars(env, jPeers, NULL) : NULL;
-        if (p) { strncpy(g_peers_str, p, sizeof g_peers_str - 1); (*env)->ReleaseStringUTFChars(env, jPeers, p); }
-    }
+    roam_plat_unlock();
     __android_log_print(ANDROID_LOG_INFO, "NFSU2-Roam", "Configured Native Roam: Room=%s, Name=%s, Peers=%s, GhostMode=%d, Hub=%08x",
                         g_room_name, g_player_name, g_peers_str, g_ghost_mode, g_hub_ip);
 }
@@ -4409,6 +5217,26 @@ JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeRoamRece
     roam_do_receive(env, srcIp, srcPort, jData);
 }
 
+JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeLanUdpReceive(
+        JNIEnv *env, jclass clazz, jint srcVip, jint dstVip, jint sport, jint dport, jbyteArray jData) {
+    (void)clazz;
+    (void)dstVip;
+    if (!env || !jData) return;
+    jsize len = (*env)->GetArrayLength(env, jData);
+    if (len <= 0 || len > LAN_UDP_PKT_MAX) return;
+    uint8_t buf[LAN_UDP_PKT_MAX];
+    (*env)->GetByteArrayRegion(env, jData, 0, len, (jbyte *)buf);
+    lan_enqueue_rx((uint32_t)srcVip, (uint16_t)sport, (uint16_t)dport, buf, (size_t)len);
+}
+
+JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeSetSwitchStatus(
+        JNIEnv *env, jclass clazz, jboolean connected, jint myVip) {
+    (void)env;
+    (void)clazz;
+    atomic_store_explicit(&g_switch_connected, (connected == JNI_TRUE) ? 1 : 0, memory_order_release);
+    atomic_store_explicit(&g_switch_vip, (uint32_t)myVip, memory_order_release);
+}
+
 JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeRoamTick(
         JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;
@@ -4421,10 +5249,255 @@ JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeRoamSay(
     roam_do_say(phrase);
 }
 
+static void roam_install_gamepad_hooks(uintptr_t base);
+static uintptr_t roam_find_nfsu2_base(void *h);
+
 JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeRoamStick(
         JNIEnv *env, jclass clazz, jfloat x, jfloat y) {
     (void)env; (void)clazz;
     roam_do_stick(x, y);
+}
+
+#define ROAM_AXIS_Z         0x0b
+#define ROAM_AXIS_RX        0x0c
+#define ROAM_AXIS_RY        0x0d
+#define ROAM_AXIS_RZ        0x0e
+#define ROAM_PAD_CAM_DZ     0.12f
+
+enum {
+    ROAM_PAD_MODE_AUTO         = 0,
+    ROAM_PAD_MODE_Z_RZ         = 1,
+    ROAM_PAD_MODE_RX_RY        = 2,
+    ROAM_PAD_MODE_DUAL_BIPOLAR = 3
+};
+
+typedef struct {
+    int32_t device_id;
+    int     java_mode;
+    int     locked_mode;
+} RoamPadDevState;
+
+#define ROAM_MAX_PAD_DEVS 16
+static pthread_mutex_t s_pad_cam_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t s_gamepad_hook_mu = PTHREAD_MUTEX_INITIALIZER;
+static RoamPadDevState s_pad_devs[ROAM_MAX_PAD_DEVS];
+static int             s_pad_dev_count = 0;
+static int             s_pad_cam_active = 0;
+static int32_t         s_pad_cam_dev = -1;
+static uintptr_t       s_nfsu2_base = 0;
+
+typedef bool    (*roam_gamepad_motion_fn)(void *self, const void *event, bool driving, void *set_key);
+typedef void    (*roam_set_guest_pad_connected_fn)(bool connected);
+typedef float   (*roam_get_axis_fn)(const void *event, int32_t axis, size_t pointer_index);
+typedef int32_t (*roam_get_devid_fn)(const void *event);
+
+static roam_gamepad_motion_fn         s_orig_gamepad_motion = NULL;
+static roam_set_guest_pad_connected_fn s_orig_set_guest_pad_connected = NULL;
+static roam_get_axis_fn               s_p_get_axis = NULL;
+static roam_get_devid_fn              s_p_get_devid = NULL;
+static int                            s_input_apis_checked = 0;
+
+static void resolve_android_input_apis(void) {
+    if (s_input_apis_checked) return;
+    s_input_apis_checked = 1;
+    s_p_get_axis = (roam_get_axis_fn)dlsym(RTLD_DEFAULT, "AMotionEvent_getAxisValue");
+    s_p_get_devid = (roam_get_devid_fn)dlsym(RTLD_DEFAULT, "AInputEvent_getDeviceId");
+    if (!s_p_get_axis || !s_p_get_devid) {
+        void *la = dlopen("libandroid.so", RTLD_NOLOAD | RTLD_LAZY);
+        if (!la) la = dlopen("libandroid.so", RTLD_LAZY);
+        if (la) {
+            if (!s_p_get_axis) s_p_get_axis = (roam_get_axis_fn)dlsym(la, "AMotionEvent_getAxisValue");
+            if (!s_p_get_devid) s_p_get_devid = (roam_get_devid_fn)dlsym(la, "AInputEvent_getDeviceId");
+        }
+    }
+}
+
+static inline float roam_clamp_stick(float v) {
+    if (!isfinite(v)) return 0.f;
+    if (v < -1.f) return -1.f;
+    if (v > 1.f) return 1.f;
+    return v;
+}
+
+static RoamPadDevState *find_or_add_pad_dev_locked(int32_t dev_id) {
+    for (int i = 0; i < s_pad_dev_count; i++) {
+        if (s_pad_devs[i].device_id == dev_id) return &s_pad_devs[i];
+    }
+    int idx = (s_pad_dev_count < ROAM_MAX_PAD_DEVS) ? s_pad_dev_count++ : (ROAM_MAX_PAD_DEVS - 1);
+    s_pad_devs[idx].device_id = dev_id;
+    s_pad_devs[idx].java_mode = ROAM_PAD_MODE_AUTO;
+    s_pad_devs[idx].locked_mode = 0;
+    return &s_pad_devs[idx];
+}
+
+static void resolve_pad_right_stick_locked(int32_t dev_id, float z, float rz, float rx, float ry, float *out_x, float *out_y) {
+    RoamPadDevState *d = find_or_add_pad_dev_locked(dev_id);
+    int mode = 0;
+    if (d->java_mode == ROAM_PAD_MODE_Z_RZ) {
+        mode = 1;
+    } else if (d->java_mode == ROAM_PAD_MODE_RX_RY) {
+        mode = 2;
+    } else if (d->locked_mode != 0) {
+        mode = d->locked_mode;
+    } else {
+        int z_idle_neg = (z < -0.85f && rz < -0.85f) && (fabsf(rx) < 0.25f && fabsf(ry) < 0.25f);
+        int rx_idle_neg = (rx < -0.85f && ry < -0.85f) && (fabsf(z) < 0.25f && fabsf(rz) < 0.25f);
+        if (z_idle_neg) {
+            d->locked_mode = 2;
+            mode = 2;
+        } else if (rx_idle_neg) {
+            d->locked_mode = 1;
+            mode = 1;
+        } else {
+            mode = (hypotf(rx, ry) > hypotf(z, rz) + 0.05f) ? 2 : 1;
+        }
+    }
+    if (mode == 2) {
+        *out_x = roam_clamp_stick(rx);
+        *out_y = roam_clamp_stick(ry);
+    } else {
+        *out_x = roam_clamp_stick(z);
+        *out_y = roam_clamp_stick(rz);
+    }
+}
+
+static bool hook_gamepad_motion(void *self, const void *event, bool driving, void *set_key) {
+    bool handled = s_orig_gamepad_motion ? s_orig_gamepad_motion(self, event, driving, set_key) : false;
+    if (!handled || !self || !event) return handled;
+
+    resolve_android_input_apis();
+    float cam_x = 0.f, cam_y = 0.f;
+    int32_t dev_id = -1;
+    int have_axes = 0;
+    if (s_p_get_axis && s_p_get_devid) {
+        dev_id = s_p_get_devid(event);
+        float z  = s_p_get_axis(event, ROAM_AXIS_Z, 0);
+        float rz = s_p_get_axis(event, ROAM_AXIS_RZ, 0);
+        float rx = s_p_get_axis(event, ROAM_AXIS_RX, 0);
+        float ry = s_p_get_axis(event, ROAM_AXIS_RY, 0);
+        pthread_mutex_lock(&s_pad_cam_mu);
+        resolve_pad_right_stick_locked(dev_id, z, rz, rx, ry, &cam_x, &cam_y);
+        pthread_mutex_unlock(&s_pad_cam_mu);
+        *(float *)((uint8_t *)self + 24) = cam_x;
+        *(float *)((uint8_t *)self + 28) = cam_y;
+        have_axes = 1;
+    }
+    if (!have_axes) {
+        cam_x = roam_clamp_stick(*(const float *)((const uint8_t *)self + 24));
+        cam_y = roam_clamp_stick(*(const float *)((const uint8_t *)self + 28));
+    }
+
+    float mag = hypotf(cam_x, cam_y);
+    int notify_stick = 0;
+    float out_x = 0.f, out_y = 0.f;
+    uintptr_t nfsu2_base = 0;
+    pthread_mutex_lock(&s_pad_cam_mu);
+    nfsu2_base = s_nfsu2_base;
+    if (mag > ROAM_PAD_CAM_DZ) {
+        s_pad_cam_active = 1;
+        s_pad_cam_dev = dev_id;
+        out_x = cam_x;
+        out_y = cam_y;
+        notify_stick = 1;
+    } else if (s_pad_cam_active && (s_pad_cam_dev < 0 || dev_id < 0 || s_pad_cam_dev == dev_id)) {
+        s_pad_cam_active = 0;
+        s_pad_cam_dev = -1;
+        out_x = 0.f;
+        out_y = 0.f;
+        notify_stick = 1;
+    }
+    pthread_mutex_unlock(&s_pad_cam_mu);
+
+    if (mag > 0.5f && nfsu2_base) {
+        __atomic_store_n((uint8_t *)(nfsu2_base + 0x97e67d4u), (uint8_t)1, __ATOMIC_RELEASE);
+    }
+    if (notify_stick) {
+        roam_stick_input(out_x, out_y);
+    }
+    return handled;
+}
+
+static void hook_set_guest_pad_connected(bool connected) {
+    if (s_orig_set_guest_pad_connected) {
+        s_orig_set_guest_pad_connected(connected);
+    }
+    if (!connected) {
+        pthread_mutex_lock(&s_pad_cam_mu);
+        int was_active = s_pad_cam_active;
+        s_pad_cam_active = 0;
+        s_pad_cam_dev = -1;
+        s_pad_dev_count = 0;
+        pthread_mutex_unlock(&s_pad_cam_mu);
+        if (was_active) {
+            roam_stick_input(0.f, 0.f);
+        }
+    }
+}
+
+JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeGamepadAxes(
+        JNIEnv *env, jclass clazz, jintArray jDeviceIds, jintArray jAxisModes) {
+    (void)clazz;
+    if (!jDeviceIds || !jAxisModes) {
+        pthread_mutex_lock(&s_pad_cam_mu);
+        int was_active = s_pad_cam_active;
+        s_pad_cam_active = 0;
+        s_pad_cam_dev = -1;
+        pthread_mutex_unlock(&s_pad_cam_mu);
+        if (was_active) {
+            roam_stick_input(0.f, 0.f);
+        }
+        return;
+    }
+
+    jsize n = (*env)->GetArrayLength(env, jDeviceIds);
+    jsize m = (*env)->GetArrayLength(env, jAxisModes);
+    if (n > m) n = m;
+    if (n > ROAM_MAX_PAD_DEVS) n = ROAM_MAX_PAD_DEVS;
+
+    jint ids[ROAM_MAX_PAD_DEVS];
+    jint modes[ROAM_MAX_PAD_DEVS];
+    if (n > 0) {
+        (*env)->GetIntArrayRegion(env, jDeviceIds, 0, n, ids);
+        (*env)->GetIntArrayRegion(env, jAxisModes, 0, n, modes);
+    }
+
+    int reset_stick = 0;
+    pthread_mutex_lock(&s_pad_cam_mu);
+    int new_count = 0;
+    RoamPadDevState updated[ROAM_MAX_PAD_DEVS];
+    int active_still_present = 0;
+    for (jsize i = 0; i < n; i++) {
+        int32_t id = (int32_t)ids[i];
+        int locked = 0;
+        for (int j = 0; j < s_pad_dev_count; j++) {
+            if (s_pad_devs[j].device_id == id && s_pad_devs[j].java_mode == (int)modes[i]) {
+                locked = s_pad_devs[j].locked_mode;
+                break;
+            }
+        }
+        updated[new_count].device_id = id;
+        updated[new_count].java_mode = (int)modes[i];
+        updated[new_count].locked_mode = locked;
+        if (s_pad_cam_active && s_pad_cam_dev == id) active_still_present = 1;
+        new_count++;
+    }
+    s_pad_dev_count = new_count;
+    if (new_count > 0) memcpy(s_pad_devs, updated, (size_t)new_count * sizeof(RoamPadDevState));
+    if (s_pad_cam_active && !active_still_present) {
+        s_pad_cam_active = 0;
+        s_pad_cam_dev = -1;
+        reset_stick = 1;
+    }
+    pthread_mutex_unlock(&s_pad_cam_mu);
+
+    if (reset_stick) {
+        roam_stick_input(0.f, 0.f);
+    }
+
+    void *h = dlopen("libnfsu2_android.so", RTLD_NOLOAD | RTLD_GLOBAL);
+    if (h) {
+        roam_install_gamepad_hooks(roam_find_nfsu2_base(h));
+    }
 }
 
 JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeRoamHorn(
@@ -4673,19 +5746,52 @@ int _ZN12GamepadInput9buttonForEi(int code) {
     }
 }
 
-static void roam_apply_gamepad_layout(int is_ps2) {
-    void *h = dlopen("libnfsu2_android.so", RTLD_NOLOAD | RTLD_GLOBAL);
-    if (!h) h = dlopen("libnfsu2_android.so", RTLD_LAZY | RTLD_GLOBAL);
+static void roam_patch_got_slot(uintptr_t slot_addr, void *replacement, void **out_orig) {
+    if (!slot_addr || !replacement) return;
+    void **slot = (void **)slot_addr;
+    void *cur = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (cur == replacement) return;
+    long ps = sysconf(_SC_PAGESIZE);
+    uintptr_t page_size = (ps > 0) ? (uintptr_t)ps : 4096u;
+    uintptr_t start = slot_addr & ~(page_size - 1u);
+    uintptr_t end = (slot_addr + sizeof(void *) + page_size - 1u) & ~(page_size - 1u);
+    if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE) != 0) return;
+    if (out_orig && !*out_orig) *out_orig = cur;
+    __atomic_store_n(slot, replacement, __ATOMIC_RELEASE);
+}
+
+static void roam_install_gamepad_hooks(uintptr_t base) {
+    if (!base) return;
+    pthread_mutex_lock(&s_gamepad_hook_mu);
+    pthread_mutex_lock(&s_pad_cam_mu);
+    if (!s_nfsu2_base) s_nfsu2_base = base;
+    pthread_mutex_unlock(&s_pad_cam_mu);
+    roam_patch_got_slot(base + 0x97dd700u, (void *)hook_gamepad_motion, (void **)&s_orig_gamepad_motion);
+    roam_patch_got_slot(base + 0x97dd550u, (void *)hook_set_guest_pad_connected, (void **)&s_orig_set_guest_pad_connected);
+    pthread_mutex_unlock(&s_gamepad_hook_mu);
+}
+
+static uintptr_t roam_find_nfsu2_base(void *h) {
     void *sym = dlsym(h ? h : RTLD_DEFAULT, "recomp_lookup");
     if (!sym) sym = dlsym(h ? h : RTLD_DEFAULT, "g_mem_base");
     if (!sym) sym = dlsym(RTLD_DEFAULT, "_ZN12GamepadInput9buttonForEi");
     Dl_info dlinfo;
     if (sym && dladdr(sym, &dlinfo) && dlinfo.dli_fbase) {
-        uintptr_t base = (uintptr_t)dlinfo.dli_fbase;
+        return (uintptr_t)dlinfo.dli_fbase;
+    }
+    return 0;
+}
+
+static void roam_apply_gamepad_layout(int is_ps2) {
+    void *h = dlopen("libnfsu2_android.so", RTLD_NOLOAD | RTLD_GLOBAL);
+    if (!h) h = dlopen("libnfsu2_android.so", RTLD_LAZY | RTLD_GLOBAL);
+    uintptr_t base = roam_find_nfsu2_base(h);
+    if (base) {
         uintptr_t page_size = sysconf(_SC_PAGESIZE);
         if (page_size == 0) page_size = 4096;
 
-        /* 1. Hook GOT entry for _ZN12GamepadInput9buttonForEi (resolves LS and RS button issues) */
+        /* 1. Hook GOT entries for _ZN12GamepadInput9buttonForEi, motion, and pad disconnect */
+        roam_install_gamepad_hooks(base);
         void **got_entry = (void**)(base + 0x97dd968);
         uintptr_t got_page = ((uintptr_t)got_entry) & ~(page_size - 1);
         mprotect((void*)got_page, page_size, PROT_READ | PROT_WRITE);
@@ -4730,9 +5836,399 @@ JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_GameActivity_nativeGamepadLayout(
     Java_com_nfsu2_androidevolved_GameActivity_nativeGamepadLayout(env, clazz, console);
 }
 
+/* =========================================================================
+ * Custom Game Data Directory Redirect (libc FS GOT hooks on libnfsu2_android.so)
+ * Prebuilt libnfsu2_android.so hardcodes "/storage/emulated/0/nfsu2".
+ * Hooking its libc filesystem GOT slots transparently redirects all reads,
+ * writes, saves, registry, and scripts to NFSU2_DATA_DIR / custom folder.
+ * ========================================================================= */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+static char s_fs_custom_dirs[2][PATH_MAX];
+static _Atomic int s_fs_dir_idx = -1;
+static _Atomic int s_fs_hooks_installed = 0;
+
+static void fs_set_custom_dir(const char *dir) {
+    if (!dir || !*dir) {
+        atomic_store_explicit(&s_fs_dir_idx, -1, memory_order_release);
+        return;
+    }
+    int cur = atomic_load_explicit(&s_fs_dir_idx, memory_order_relaxed);
+    int next = (cur == 0) ? 1 : 0;
+    size_t len = strlen(dir);
+    while (len > 1 && dir[len - 1] == '/') len--;
+    if (len >= PATH_MAX) len = PATH_MAX - 1;
+    memcpy(s_fs_custom_dirs[next], dir, len);
+    s_fs_custom_dirs[next][len] = '\0';
+    atomic_store_explicit(&s_fs_dir_idx, next, memory_order_release);
+}
+
+static const char *fs_get_custom_dir(void) {
+    int idx = atomic_load_explicit(&s_fs_dir_idx, memory_order_acquire);
+    if (idx == 0 || idx == 1) {
+        if (s_fs_custom_dirs[idx][0]) return s_fs_custom_dirs[idx];
+    }
+    const char *env = getenv("NFSU2_DATA_DIR");
+    if (env && *env) return env;
+    return NULL;
+}
+
+static const char *fs_remap_path(const char *path, char *buf, size_t bufsz, int *did_remap) {
+    if (did_remap) *did_remap = 0;
+    if (!path || path[0] != '/') return path;
+    const char *custom = fs_get_custom_dir();
+    if (!custom || !*custom) return path;
+
+    static const char *const kPrefixes[2] = {
+        "/storage/emulated/0/nfsu2",
+        "/sdcard/nfsu2"
+    };
+    size_t clen = strlen(custom);
+    while (clen > 1 && custom[clen - 1] == '/') clen--;
+
+    for (int i = 0; i < 2; i++) {
+        size_t plen = strlen(kPrefixes[i]);
+        if (strncasecmp(path, kPrefixes[i], plen) == 0 &&
+            (path[plen] == '\0' || path[plen] == '/')) {
+            if (clen == plen && strcmp(custom, kPrefixes[i]) == 0) return path;
+            const char *rest = path + plen;
+            int n = snprintf(buf, bufsz, "%.*s%s", (int)clen, custom, rest);
+            if (n > 0 && (size_t)n < bufsz) {
+                if (did_remap) *did_remap = 1;
+                return buf;
+            }
+        }
+    }
+    return path;
+}
+
+static int fs_alt_speed2_exe(const char *mapped, int variant, char *alt, size_t altsz) {
+    if (!mapped) return 0;
+    size_t len = strlen(mapped);
+    if (len < 11 || strcmp(mapped + len - 11, "/SPEED2.EXE") != 0) return 0;
+    const char *repl = (variant == 0) ? "/speed2.exe" : "/Speed2.exe";
+    int n = snprintf(alt, altsz, "%.*s%s", (int)(len - 11), mapped, repl);
+    return (n > 0 && (size_t)n < altsz);
+}
+
+static int (*s_orig_fs_access)(const char *, int) = NULL;
+static FILE *(*s_orig_fs_fopen)(const char *, const char *) = NULL;
+static int (*s_orig_fs_stat)(const char *, struct stat *) = NULL;
+static DIR *(*s_orig_fs_opendir)(const char *) = NULL;
+static int (*s_orig_fs_unlink)(const char *) = NULL;
+static int (*s_orig_fs_rmdir)(const char *) = NULL;
+static int (*s_orig_fs_rename)(const char *, const char *) = NULL;
+static int (*s_orig_fs_mkdir)(const char *, mode_t) = NULL;
+static int (*s_orig_fs_open_2)(const char *, int) = NULL;
+static int (*s_orig_fs_open)(const char *, int, ...) = NULL;
+static ssize_t (*s_orig_fs_readlink)(const char *, char *, size_t) = NULL;
+static int (*s_orig_fs_remove)(const char *) = NULL;
+static char *(*s_orig_fs_realpath)(const char *, char *) = NULL;
+static int (*s_orig_fs_lstat)(const char *, struct stat *) = NULL;
+static int (*s_orig_fs_symlink)(const char *, const char *) = NULL;
+static int (*s_orig_fs_link)(const char *, const char *) = NULL;
+static long (*s_orig_fs_pathconf)(const char *, int) = NULL;
+static int (*s_orig_fs_chdir)(const char *) = NULL;
+static int (*s_orig_fs_utimensat)(int, const char *, const struct timespec[2], int) = NULL;
+static int (*s_orig_fs_fchmodat)(int, const char *, mode_t, int) = NULL;
+static int (*s_orig_fs_openat)(int, const char *, int, ...) = NULL;
+static int (*s_orig_fs_unlinkat)(int, const char *, int) = NULL;
+static int (*s_orig_fs_truncate)(const char *, off_t) = NULL;
+static int (*s_orig_fs_statvfs)(const char *, struct statvfs *) = NULL;
+
+static int hook_fs_access(const char *path, int mode) {
+    char buf[PATH_MAX], alt[PATH_MAX];
+    int remapped = 0;
+    const char *p = fs_remap_path(path, buf, sizeof buf, &remapped);
+    int r = s_orig_fs_access(p, mode);
+    if (r != 0 && errno == ENOENT) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt) && s_orig_fs_access(alt, mode) == 0) return 0;
+        }
+    }
+    return r;
+}
+
+static FILE *hook_fs_fopen(const char *path, const char *mode) {
+    char buf[PATH_MAX], alt[PATH_MAX];
+    const char *p = fs_remap_path(path, buf, sizeof buf, NULL);
+    FILE *f = s_orig_fs_fopen(p, mode);
+    if (!f && errno == ENOENT) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt)) {
+                f = s_orig_fs_fopen(alt, mode);
+                if (f) return f;
+            }
+        }
+    }
+    return f;
+}
+
+static int hook_fs_stat(const char *path, struct stat *st) {
+    char buf[PATH_MAX], alt[PATH_MAX];
+    const char *p = fs_remap_path(path, buf, sizeof buf, NULL);
+    int r = s_orig_fs_stat(p, st);
+    if (r != 0 && errno == ENOENT) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt) && s_orig_fs_stat(alt, st) == 0) return 0;
+        }
+    }
+    return r;
+}
+
+static DIR *hook_fs_opendir(const char *name) {
+    char buf[PATH_MAX];
+    return s_orig_fs_opendir(fs_remap_path(name, buf, sizeof buf, NULL));
+}
+
+static int hook_fs_unlink(const char *path) {
+    char buf[PATH_MAX];
+    return s_orig_fs_unlink(fs_remap_path(path, buf, sizeof buf, NULL));
+}
+
+static int hook_fs_rmdir(const char *path) {
+    char buf[PATH_MAX];
+    return s_orig_fs_rmdir(fs_remap_path(path, buf, sizeof buf, NULL));
+}
+
+static int hook_fs_rename(const char *oldpath, const char *newpath) {
+    char b1[PATH_MAX], b2[PATH_MAX];
+    return s_orig_fs_rename(fs_remap_path(oldpath, b1, sizeof b1, NULL),
+                            fs_remap_path(newpath, b2, sizeof b2, NULL));
+}
+
+static int hook_fs_mkdir(const char *path, mode_t mode) {
+    char buf[PATH_MAX];
+    return s_orig_fs_mkdir(fs_remap_path(path, buf, sizeof buf, NULL), mode);
+}
+
+static int hook_fs_open_2(const char *path, int flags) {
+    char buf[PATH_MAX], alt[PATH_MAX];
+    const char *p = fs_remap_path(path, buf, sizeof buf, NULL);
+    int fd = s_orig_fs_open_2(p, flags);
+    if (fd < 0 && errno == ENOENT) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt)) {
+                fd = s_orig_fs_open_2(alt, flags);
+                if (fd >= 0) return fd;
+            }
+        }
+    }
+    return fd;
+}
+
+static int hook_fs_open(const char *path, int flags, ...) {
+    mode_t mode = 0;
+    int has_mode = (flags & O_CREAT) != 0;
+#ifdef O_TMPFILE
+    if ((flags & O_TMPFILE) == O_TMPFILE) has_mode = 1;
+#endif
+    if (has_mode) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, unsigned int);
+        va_end(ap);
+    }
+    char buf[PATH_MAX], alt[PATH_MAX];
+    const char *p = fs_remap_path(path, buf, sizeof buf, NULL);
+    int fd = has_mode ? s_orig_fs_open(p, flags, mode) : s_orig_fs_open(p, flags);
+    if (fd < 0 && errno == ENOENT && !has_mode) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt)) {
+                fd = s_orig_fs_open(alt, flags);
+                if (fd >= 0) return fd;
+            }
+        }
+    }
+    return fd;
+}
+
+static ssize_t hook_fs_readlink(const char *path, char *out, size_t bufsiz) {
+    char buf[PATH_MAX];
+    return s_orig_fs_readlink(fs_remap_path(path, buf, sizeof buf, NULL), out, bufsiz);
+}
+
+static int hook_fs_remove(const char *path) {
+    char buf[PATH_MAX];
+    return s_orig_fs_remove(fs_remap_path(path, buf, sizeof buf, NULL));
+}
+
+static char *hook_fs_realpath(const char *path, char *resolved) {
+    char buf[PATH_MAX];
+    return s_orig_fs_realpath(fs_remap_path(path, buf, sizeof buf, NULL), resolved);
+}
+
+static int hook_fs_lstat(const char *path, struct stat *st) {
+    char buf[PATH_MAX], alt[PATH_MAX];
+    const char *p = fs_remap_path(path, buf, sizeof buf, NULL);
+    int r = s_orig_fs_lstat(p, st);
+    if (r != 0 && errno == ENOENT) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt) && s_orig_fs_lstat(alt, st) == 0) return 0;
+        }
+    }
+    return r;
+}
+
+static int hook_fs_symlink(const char *target, const char *linkpath) {
+    char b1[PATH_MAX], b2[PATH_MAX];
+    return s_orig_fs_symlink(fs_remap_path(target, b1, sizeof b1, NULL),
+                             fs_remap_path(linkpath, b2, sizeof b2, NULL));
+}
+
+static int hook_fs_link(const char *oldpath, const char *newpath) {
+    char b1[PATH_MAX], b2[PATH_MAX];
+    return s_orig_fs_link(fs_remap_path(oldpath, b1, sizeof b1, NULL),
+                          fs_remap_path(newpath, b2, sizeof b2, NULL));
+}
+
+static long hook_fs_pathconf(const char *path, int name) {
+    char buf[PATH_MAX];
+    return s_orig_fs_pathconf(fs_remap_path(path, buf, sizeof buf, NULL), name);
+}
+
+static int hook_fs_chdir(const char *path) {
+    char buf[PATH_MAX];
+    return s_orig_fs_chdir(fs_remap_path(path, buf, sizeof buf, NULL));
+}
+
+static int hook_fs_utimensat(int dirfd, const char *path, const struct timespec times[2], int flags) {
+    char buf[PATH_MAX];
+    return s_orig_fs_utimensat(dirfd, fs_remap_path(path, buf, sizeof buf, NULL), times, flags);
+}
+
+static int hook_fs_fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+    char buf[PATH_MAX];
+    return s_orig_fs_fchmodat(dirfd, fs_remap_path(path, buf, sizeof buf, NULL), mode, flags);
+}
+
+static int hook_fs_openat(int dirfd, const char *path, int flags, ...) {
+    mode_t mode = 0;
+    int has_mode = (flags & O_CREAT) != 0;
+#ifdef O_TMPFILE
+    if ((flags & O_TMPFILE) == O_TMPFILE) has_mode = 1;
+#endif
+    if (has_mode) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, unsigned int);
+        va_end(ap);
+    }
+    char buf[PATH_MAX], alt[PATH_MAX];
+    const char *p = fs_remap_path(path, buf, sizeof buf, NULL);
+    int fd = has_mode ? s_orig_fs_openat(dirfd, p, flags, mode) : s_orig_fs_openat(dirfd, p, flags);
+    if (fd < 0 && errno == ENOENT && !has_mode) {
+        for (int v = 0; v < 2; v++) {
+            if (fs_alt_speed2_exe(p, v, alt, sizeof alt)) {
+                fd = s_orig_fs_openat(dirfd, alt, flags);
+                if (fd >= 0) return fd;
+            }
+        }
+    }
+    return fd;
+}
+
+static int hook_fs_unlinkat(int dirfd, const char *path, int flags) {
+    char buf[PATH_MAX];
+    return s_orig_fs_unlinkat(dirfd, fs_remap_path(path, buf, sizeof buf, NULL), flags);
+}
+
+static int hook_fs_truncate(const char *path, off_t length) {
+    char buf[PATH_MAX];
+    return s_orig_fs_truncate(fs_remap_path(path, buf, sizeof buf, NULL), length);
+}
+
+static int hook_fs_statvfs(const char *path, struct statvfs *out) {
+    char buf[PATH_MAX];
+    return s_orig_fs_statvfs(fs_remap_path(path, buf, sizeof buf, NULL), out);
+}
+
+static void install_fs_redirect_hooks(void) {
+    if (atomic_load(&s_fs_hooks_installed)) return;
+    void *h = dlopen("libnfsu2_android.so", RTLD_NOLOAD | RTLD_GLOBAL);
+    if (!h) h = dlopen("libnfsu2_android.so", RTLD_LAZY | RTLD_GLOBAL);
+    void *sym = dlsym(h ? h : RTLD_DEFAULT, "recomp_lookup");
+    if (!sym) sym = dlsym(h ? h : RTLD_DEFAULT, "g_mem_base");
+    Dl_info dlinfo;
+    if (!sym || !dladdr(sym, &dlinfo) || !dlinfo.dli_fbase) return;
+    uintptr_t lib_base = (uintptr_t)dlinfo.dli_fbase;
+    long page_sz = sysconf(_SC_PAGESIZE);
+    if (page_sz <= 0) page_sz = 16384;
+
+    struct {
+        const char *name;
+        uintptr_t got_off;
+        void *hook;
+        void **orig_out;
+    } fs_hooks[] = {
+        { "access",    0x97dd5f0u, (void *)hook_fs_access,    (void **)&s_orig_fs_access },
+        { "fopen",     0x97dd7b0u, (void *)hook_fs_fopen,     (void **)&s_orig_fs_fopen },
+        { "stat",      0x97dd7c8u, (void *)hook_fs_stat,      (void **)&s_orig_fs_stat },
+        { "opendir",   0x97dd7d0u, (void *)hook_fs_opendir,   (void **)&s_orig_fs_opendir },
+        { "unlink",    0x97dd9d8u, (void *)hook_fs_unlink,    (void **)&s_orig_fs_unlink },
+        { "rmdir",     0x97dd9e0u, (void *)hook_fs_rmdir,     (void **)&s_orig_fs_rmdir },
+        { "rename",    0x97dd9e8u, (void *)hook_fs_rename,    (void **)&s_orig_fs_rename },
+        { "mkdir",     0x97dda70u, (void *)hook_fs_mkdir,     (void **)&s_orig_fs_mkdir },
+        { "__open_2",  0x97dda78u, (void *)hook_fs_open_2,    (void **)&s_orig_fs_open_2 },
+        { "open",      0x97dda80u, (void *)hook_fs_open,      (void **)&s_orig_fs_open },
+        { "readlink",  0x97df088u, (void *)hook_fs_readlink,  (void **)&s_orig_fs_readlink },
+        { "remove",    0x97e12b0u, (void *)hook_fs_remove,    (void **)&s_orig_fs_remove },
+        { "realpath",  0x97e2118u, (void *)hook_fs_realpath,  (void **)&s_orig_fs_realpath },
+        { "lstat",     0x97e2120u, (void *)hook_fs_lstat,     (void **)&s_orig_fs_lstat },
+        { "symlink",   0x97e2128u, (void *)hook_fs_symlink,   (void **)&s_orig_fs_symlink },
+        { "link",      0x97e2130u, (void *)hook_fs_link,      (void **)&s_orig_fs_link },
+        { "pathconf",  0x97e2150u, (void *)hook_fs_pathconf,  (void **)&s_orig_fs_pathconf },
+        { "chdir",     0x97e2160u, (void *)hook_fs_chdir,     (void **)&s_orig_fs_chdir },
+        { "utimensat", 0x97e2168u, (void *)hook_fs_utimensat, (void **)&s_orig_fs_utimensat },
+        { "fchmodat",  0x97e2170u, (void *)hook_fs_fchmodat,  (void **)&s_orig_fs_fchmodat },
+        { "openat",    0x97e2178u, (void *)hook_fs_openat,    (void **)&s_orig_fs_openat },
+        { "unlinkat",  0x97e2188u, (void *)hook_fs_unlinkat,  (void **)&s_orig_fs_unlinkat },
+        { "truncate",  0x97e2190u, (void *)hook_fs_truncate,  (void **)&s_orig_fs_truncate },
+        { "statvfs",   0x97e2198u, (void *)hook_fs_statvfs,   (void **)&s_orig_fs_statvfs },
+    };
+
+    int patched = 0;
+    for (size_t i = 0; i < sizeof(fs_hooks) / sizeof(fs_hooks[0]); i++) {
+        void **slot = (void **)(lib_base + fs_hooks[i].got_off);
+        void *cur = *slot;
+        if (!cur || cur == fs_hooks[i].hook) continue;
+        uintptr_t gs = (uintptr_t)slot & ~((uintptr_t)page_sz - 1);
+        uintptr_t ge = ((uintptr_t)(slot + 1) + (uintptr_t)page_sz - 1) & ~((uintptr_t)page_sz - 1);
+        if (mprotect((void *)gs, ge - gs, PROT_READ | PROT_WRITE) == 0) {
+            *fs_hooks[i].orig_out = cur;
+            *slot = fs_hooks[i].hook;
+            patched++;
+        }
+    }
+    if (patched > 0) {
+        atomic_store(&s_fs_hooks_installed, 1);
+        __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook",
+            "Installed %d libc FS path-redirect GOT hooks on libnfsu2_android.so", patched);
+    }
+}
+
+JNIEXPORT void JNICALL Java_io_mininxd_nfsu2_net_RoamNativeBridge_nativeSetGameDataDir(
+        JNIEnv *env, jclass clazz, jstring jPath) {
+    (void)clazz;
+    if (env && jPath) {
+        const char *p = (*env)->GetStringUTFChars(env, jPath, NULL);
+        if (p) {
+            fs_set_custom_dir(p);
+            setenv("NFSU2_DATA_DIR", p, 1);
+            __android_log_print(ANDROID_LOG_INFO, "NFSU2-Hook",
+                "Configured custom game data directory: %s", p);
+            (*env)->ReleaseStringUTFChars(env, jPath, p);
+        }
+    }
+    install_fs_redirect_hooks();
+}
+
 __attribute__((constructor)) static void powervr_guard_ctor(void) {
     install_powervr_fault_guard();
     install_guest_null_fault_guard();
+    install_fs_redirect_hooks();
     roam_apply_gamepad_layout(0);
 
     pthread_t th;

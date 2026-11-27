@@ -61,16 +61,6 @@ void hiddenraces_frame_tick(void) {
 void extraoptions_init_patches(void) {
     if (!rh_mem_committed(0x00400000u, 0x1000)) return;
 
-    // Bleach Bypass / Enhanced Contrast engine resolve clamp:
-    // Clamp 0x00870D00 (g_BleachByPassEnable) and 0x00870CFC (g_OverBrightEnable) to 0
-    // so SPEED2.EXE skips slow 3-pass ping-pong resolves that drop FPS to 30-40.
-    if (rh_mem_committed(0x00870D00u, 4)) {
-        MR32(0x00870D00u) = 0;
-    }
-    if (rh_mem_committed(0x00870CFCu, 4)) {
-        MR32(0x00870CFCu) = 0;
-    }
-
     // Optical drive / Disc 2 bypass
     if (rh_mem_committed(0x005C0D3Fu, 1)) MR8(0x005C0D3Fu) = 0x78;
     if (rh_mem_committed(0x005C0D54u, 1)) MR8(0x005C0D54u) = 0x00;
@@ -174,6 +164,11 @@ void extraoptions_frame_tick(void) {
     static int s_applied_state = -1;
     static uint32_t s_applied_player = 0;
 
+    /* Never interfere with JoyLog Replay playback (0x008650D0 != 0) */
+    if (rh_mem_committed(0x008650D0u, 4) && MR32(0x008650D0u) != 0u) {
+        return;
+    }
+
     if (!rh_mem_committed(0x008900ACu, 4)) {
         s_applied_player = 0;
         s_applied_state = -1;
@@ -193,10 +188,10 @@ void extraoptions_frame_tick(void) {
             roam_android_call(0x005FAE20u, player, 0, 0, NULL);
             __android_log_print(ANDROID_LOG_INFO, "NFSU2-ExtraOptions",
                                 "Dumb AI (AutoPilot) ENABLED on player car 0x%08x", player);
-        } else {
-            // Player_AutoPilotOff (0x005FAF10) with ecx = player
+        } else if (s_applied_state == 1 && s_applied_player == player) {
+            // Only disable AutoPilot / restore controller input when transitioning FROM Dumb AI ON -> OFF.
+            // Calling SetInputMode(2) on every freshly spawned player stomps on Replay playback and NIS autopilot.
             roam_android_call(0x005FAF10u, player, 0, 0, NULL);
-            // Player_SetInputMode (0x00605C70) with ecx = player, mode = 2
             uint32_t arg = 2;
             roam_android_call(0x00605C70u, player, 0, 1, &arg);
             __android_log_print(ANDROID_LOG_INFO, "NFSU2-ExtraOptions",
@@ -379,19 +374,15 @@ void whine_frame_tick(void) {
 }
 
 /* =========================================================================
- * 3600 Hz Exact Simulation Tick Base (framerate.c parity)
+ * Vanilla 1800 Hz Simulation Tick Base (exact integers for 30/60/90/120 FPS)
  * ========================================================================= */
-#define A_TICK_HZ_ADDR  0x007a061cu   /* 1800.0 vanilla -> 3600.0 exact */
-#define A_TICK_4K_ADDR  0x007a0aa8u   /* 4000/1800 vanilla -> 4000/3600 exact */
-#define A_TICK_S_ADDR   0x007a0618u   /* 1/1800 vanilla -> 1/3600 exact */
+#define A_TICK_HZ_ADDR  0x007a061cu   /* 1800.0 vanilla */
+#define A_TICK_4K_ADDR  0x007a0aa8u   /* 4000/1800 vanilla */
+#define A_TICK_S_ADDR   0x007a0618u   /* 1/1800 vanilla */
 
 void framerate_tick_base_apply(void) {
-    if (!g_p_mem_base || !*g_p_mem_base) return;
-    if (!rh_mem_committed(A_TICK_S_ADDR, 8) || !rh_mem_committed(A_TICK_4K_ADDR, 4)) return;
-
-    if (MRF32(A_TICK_HZ_ADDR) != 3600.0f) {
-        MRF32(A_TICK_HZ_ADDR) = 3600.0f;
-        MRF32(A_TICK_4K_ADDR) = (float)(4000.0 / 3600.0);
-        MRF32(A_TICK_S_ADDR)  = (float)(1.0 / 3600.0);
-    }
+    /* Keep SPEED2.EXE's vanilla 1800 Hz tick base intact.
+     * 1800 Hz divides 30, 60, 90, and 120 FPS into exact integer ticks (60, 30, 20, 15)
+     * while preserving full 8-bit JoyLog tick headroom (~141 ms max) and avoiding
+     * carry/WorldTimer drift in unhooked FrameTimeUpdate (0x57EAD0) during Race Replays. */
 }

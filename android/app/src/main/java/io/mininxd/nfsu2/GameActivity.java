@@ -58,6 +58,7 @@ public final class GameActivity extends NativeActivity {
     }
     private boolean requested;
     private boolean foreground;
+    private String activeGameRootPath;
     private TextView status;
     private PopupWindow statusWindow;
 
@@ -217,9 +218,31 @@ public final class GameActivity extends NativeActivity {
      * themselves as joysticks with X/Y axes, and their resting value used to steer the car by itself.
      * Pads in "keyboard" mode report only KEYBOARD but still have gamepad buttons.
      */
+    private volatile boolean javaPadStickActive = false;
+
+    private static boolean hasBipolarRange(android.view.InputDevice device, int axis) {
+        android.view.InputDevice.MotionRange r =
+                device.getMotionRange(axis, android.view.InputDevice.SOURCE_JOYSTICK);
+        if (r == null) r = device.getMotionRange(axis);
+        return r != null && r.getMin() <= -0.5f && r.getMax() >= 0.5f;
+    }
+
+    private static int classifyRightStickMode(android.view.InputDevice device) {
+        if (device == null) return 0;
+        boolean zBipolar = hasBipolarRange(device, android.view.MotionEvent.AXIS_Z)
+                && hasBipolarRange(device, android.view.MotionEvent.AXIS_RZ);
+        boolean rxBipolar = hasBipolarRange(device, android.view.MotionEvent.AXIS_RX)
+                && hasBipolarRange(device, android.view.MotionEvent.AXIS_RY);
+        if (zBipolar && !rxBipolar) return 1;
+        if (rxBipolar && !zBipolar) return 2;
+        if (zBipolar && rxBipolar) return 3;
+        return 0;
+    }
+
     private void updateGamepads() {
         boolean connected=false;
         java.util.ArrayList<Integer> accepted=new java.util.ArrayList<>();
+        java.util.ArrayList<Integer> axisModes=new java.util.ArrayList<>();
         StringBuilder seen=new StringBuilder();
         for(int id:android.view.InputDevice.getDeviceIds()) {
             android.view.InputDevice device=android.view.InputDevice.getDevice(id);
@@ -238,11 +261,13 @@ public final class GameActivity extends NativeActivity {
             boolean pad=(device.isExternal()||buttons||stick)&&(buttons||stick||keys);
             seen.append(seen.length()==0?"":"; ").append(device.getName()).append(" [").append(Integer.toHexString(sources))
                     .append(device.isExternal()?" external":" internal").append(pad?" pad":"").append(']');
-            if(pad){connected=true;accepted.add(id);}
+            if(pad){connected=true;accepted.add(id);axisModes.add(classifyRightStickMode(device));}
         }
         android.util.Log.i("NFS","Input devices: "+seen);
         // Only these devices may move the guest's stick or press its keys.
         int[] ids=new int[accepted.size()];for(int i=0;i<ids.length;++i)ids[i]=accepted.get(i);
+        int[] modes=new int[axisModes.size()];for(int i=0;i<modes.length;++i)modes[i]=axisModes.get(i);
+        AdhocRoamClient.nativeGamepadAxes(ids, modes);
         nativeGamepadDevices(ids);
         if(touchControls!=null)touchControls.setGamepadConnected(connected);
         nativeGamepadConnected(connected);
@@ -407,26 +432,31 @@ public final class GameActivity extends NativeActivity {
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
     }
     @Override protected void onCreate(Bundle saved) {
-        // The native runtime opens its data relative to the working directory: enter the chosen game folder first.
-        // The game runs in its own process: statics set by the launcher are gone, so the folder arrives as an intent extra.
-        String rootExtra = getIntent() != null ? getIntent().getStringExtra("gameRoot") : null;
-        if (rootExtra != null && !rootExtra.isEmpty()) LauncherActivity.sCustomGamePath = rootExtra;
-        StorageFix.enter(rootExtra != null && !rootExtra.isEmpty() ? new File(rootExtra) : LauncherActivity.gameRoot(this));
-        super.onCreate(saved);
+        // Configure custom game data directory BEFORE super.onCreate(saved),
+        // because NativeActivity.onCreate() starts android_main() immediately.
         LauncherActivity.sAppContext = getApplicationContext();
-        s_instance = this;
-        GameOptions.syncWidescreenIni(this);
-        Intent launch = getIntent();
+        Intent preLaunch = getIntent();
+        String earlyGameRoot = preLaunch != null ? preLaunch.getStringExtra("gameRoot") : null;
+        if (earlyGameRoot == null || earlyGameRoot.trim().isEmpty()) {
+            earlyGameRoot = LauncherActivity.gameRoot(this).getAbsolutePath();
+        }
+        StorageFix.enter(new File(earlyGameRoot));
+        activeGameRootPath = earlyGameRoot;
+        LauncherActivity.sCustomGamePath = earlyGameRoot;
         try {
-            String gameRootPath = launch != null ? launch.getStringExtra("gameRoot") : null;
-            if (gameRootPath == null || gameRootPath.isEmpty()) {
-                gameRootPath = LauncherActivity.gameRoot(this).getAbsolutePath();
-            }
-            android.system.Os.setenv("NFSU2_DATA_DIR", gameRootPath, true);
-            String backend = launch != null ? launch.getStringExtra("graphicsBackend") : null;
+            android.system.Os.setenv("NFSU2_DATA_DIR", earlyGameRoot, true);
+        } catch (Throwable ignored) {}
+        io.mininxd.nfsu2.net.RoamNativeBridge.setGameDataDir(earlyGameRoot);
+        try {
+            String backend = preLaunch != null ? preLaunch.getStringExtra("graphicsBackend") : null;
             if (backend == null || "auto".equalsIgnoreCase(backend)) backend = GameOptions.getEffectiveGraphicsBackend(this);
             android.system.Os.setenv("NFSU2_RENDERER", backend, true);
         } catch (Throwable ignored) {}
+
+        super.onCreate(saved);
+        s_instance = this;
+        GameOptions.syncWidescreenIni(this);
+        Intent launch = getIntent();
         GamePerformanceBooster.apply(this, getWindow());
         PerformanceCores.bindToPerformanceCores();
         GameLog.init(this);
@@ -487,6 +517,7 @@ public final class GameActivity extends NativeActivity {
                 }
             } catch (Throwable ignored) {}
             android.system.Os.setenv("NFSU2_EXTRA_OPTIONS", extraOptions ? "1" : "0", true);
+            android.system.Os.setenv("NFSU2_ASI_LOADER", "0", true);
 
             android.system.Os.setenv("NFSU2_AUTOSAVE", "1", true);
 
@@ -515,8 +546,8 @@ public final class GameActivity extends NativeActivity {
             else if ("original".equals(drawDist)) distVal = 0.0f;
             android.system.Os.setenv("NFSU2_DRAW_DISTANCE", String.valueOf((int)distVal), true);
 
-            android.system.Os.setenv("NFSU2_CROWD", "0", true);
-            GraphicsCacheManager.setCrowdSuppression(true);
+            android.system.Os.setenv("NFSU2_CROWD", "1", true);
+            GraphicsCacheManager.setCrowdSuppression(false);
             android.system.Os.setenv("NFSU2_NEWS_URL", "https://api.mininxd.tech/nfsu2_news", true);
             refreshNewsAsync();
 
@@ -599,7 +630,9 @@ public final class GameActivity extends NativeActivity {
         status.setBackgroundColor(0xb0000000);
         status.setTextSize(18);
         status.setPadding(24, 16, 24, 16);
-        status.setText("NFSU2 Revived\nChecking internal storage/nfsu2…");
+        String displayDir = (activeGameRootPath != null && !activeGameRootPath.isEmpty())
+                ? activeGameRootPath : "internal storage/nfsu2";
+        status.setText("NFSU2 Revived\nChecking " + displayDir + "…");
         // NativeActivity gives its main window surface to Vulkan; use a separate
         // non-interactive popup surface for the diagnostic text.
         statusWindow = new PopupWindow(status, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -700,8 +733,12 @@ public final class GameActivity extends NativeActivity {
             } else {
                 message = message.replaceAll("Vulkan ([0-9]+\\.[0-9]+).*?: presentación activa", "Vulkan $1: presentation active");
             }
+            String activeDirLabel = (activeGameRootPath != null && !activeGameRootPath.isEmpty())
+                    ? activeGameRootPath : "internal storage/nfsu2";
             message = message
-                    .replace("Datos accesibles: memoria interna/nfsu2", "Accessible data: internal storage/nfsu2")
+                    .replace("Datos accesibles: memoria interna/nfsu2", "Accessible data: " + activeDirLabel)
+                    .replace("internal storage/nfsu2", activeDirLabel)
+                    .replace("Internal storage/nfsu2", activeDirLabel)
                     .replace("Ejecutando entrada CRT del juego…", "Executing game CRT entry…")
                     .replace("Ejecutando entrada CRT del juego", "Executing game CRT entry…")
                     .replace("Arranque guest detenido:", "Guest boot halted:")
@@ -780,6 +817,8 @@ public final class GameActivity extends NativeActivity {
         super.onWindowFocusChanged(focused);
         if(!focused) {
             if(touchControls!=null)touchControls.releaseAll();
+            AdhocRoamClient.nativeGamepadAxes(null, null);
+            javaPadStickActive = false;
             setTiltKeys(false,false);
             if(diagnosticOverlay!=null)diagnosticOverlay.hide();
         }
@@ -831,6 +870,8 @@ public final class GameActivity extends NativeActivity {
         if(inputManager!=null)inputManager.unregisterInputDeviceListener(gamepadListener);
         if (statusWindow != null) statusWindow.dismiss();
         if (touchControls != null) {touchControls.removeCallbacks(updateControlMode);touchControls.releaseAll();}
+        AdhocRoamClient.nativeGamepadAxes(null, null);
+        javaPadStickActive = false;
         if (controlsWindow != null) controlsWindow.dismiss();
         GpuClockGovernor.pause();
         super.onPause();
@@ -1059,18 +1100,47 @@ public final class GameActivity extends NativeActivity {
             if (touchControls != null) {
                 touchControls.notifyGamepadActive(true);
             }
+            int mode = classifyRightStickMode(event.getDevice());
             float rx_z = event.getAxisValue(android.view.MotionEvent.AXIS_Z);
-            float rx_rot = event.getAxisValue(android.view.MotionEvent.AXIS_RX);
-            float rx = Math.abs(rx_rot) >= Math.abs(rx_z) ? rx_rot : rx_z;
-
             float ry_z = event.getAxisValue(android.view.MotionEvent.AXIS_RZ);
+            float rx_rot = event.getAxisValue(android.view.MotionEvent.AXIS_RX);
             float ry_rot = event.getAxisValue(android.view.MotionEvent.AXIS_RY);
-            float ry = Math.abs(ry_rot) >= Math.abs(ry_z) ? ry_rot : ry_z;
-            if (Math.abs(rx) > 0.15f || Math.abs(ry) > 0.15f) {
+            float rx;
+            float ry;
+            if (mode == 1) {
+                rx = rx_z;
+                ry = ry_z;
+            } else if (mode == 2) {
+                rx = rx_rot;
+                ry = ry_rot;
+            } else {
+                boolean zTriggerIdle = (rx_z < -0.85f && ry_z < -0.85f)
+                        && Math.abs(rx_rot) < 0.25f && Math.abs(ry_rot) < 0.25f;
+                boolean rxTriggerIdle = (rx_rot < -0.85f && ry_rot < -0.85f)
+                        && Math.abs(rx_z) < 0.25f && Math.abs(ry_z) < 0.25f;
+                if (zTriggerIdle) {
+                    rx = rx_rot;
+                    ry = ry_rot;
+                } else if (rxTriggerIdle) {
+                    rx = rx_z;
+                    ry = ry_z;
+                } else if (Math.hypot(rx_rot, ry_rot) > Math.hypot(rx_z, ry_z) + 0.05) {
+                    rx = rx_rot;
+                    ry = ry_rot;
+                } else {
+                    rx = rx_z;
+                    ry = ry_z;
+                }
+            }
+            rx = Math.max(-1f, Math.min(1f, rx));
+            ry = Math.max(-1f, Math.min(1f, ry));
+            if (Math.hypot(rx, ry) > 0.12) {
+                javaPadStickActive = true;
                 AdhocRoamClient.handleRightStick(rx, ry);
                 nativeFeedGamepadStick(rx, ry);
                 InputLog.cameraLook("RightStick", rx, ry, 0f, 0f);
-            } else {
+            } else if (javaPadStickActive) {
+                javaPadStickActive = false;
                 AdhocRoamClient.handleRightStick(0f, 0f);
                 nativeFeedGamepadStick(0f, 0f);
             }
